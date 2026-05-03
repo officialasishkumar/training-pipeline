@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a defect in training-pipeline
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug clearly. Include the exact CLI command or Python snippet.
+      placeholder: |
+        Ran `tp redact --input ...` and got <error>...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: |
+        Provide a minimal log record / config / command that reproduces the issue.
+        IMPORTANT: redact any real PII before pasting. See docs/PII_POLICY.md.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: training-pipeline version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.11"
+    validations:
+      required: true

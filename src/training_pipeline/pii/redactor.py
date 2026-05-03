@@ -187,15 +187,11 @@ class Redactor:
     ) -> tuple[Event, list[PIIDetection]]:
         all_detections: list[PIIDetection] = []
         if isinstance(ev, UserEvent):
-            new_text, det = self.redact_text(
-                ev.content, memo=memo, category_counts=category_counts
-            )
+            new_text, det = self.redact_text(ev.content, memo=memo, category_counts=category_counts)
             all_detections.extend(det)
             return ev.model_copy(update={"content": new_text}), all_detections
         if isinstance(ev, AssistantEvent):
-            new_text, det = self.redact_text(
-                ev.content, memo=memo, category_counts=category_counts
-            )
+            new_text, det = self.redact_text(ev.content, memo=memo, category_counts=category_counts)
             all_detections.extend(det)
             return ev.model_copy(update={"content": new_text}), all_detections
         if isinstance(ev, ToolCallEvent):
@@ -212,20 +208,14 @@ class Redactor:
                         new_args = {"_redacted": redacted_args_text}
                 except orjson.JSONDecodeError:
                     new_args = {"_redacted": redacted_args_text}
-                new_calls.append(
-                    ToolCall(id=call.id, name=call.name, arguments=new_args)
-                )
+                new_calls.append(ToolCall(id=call.id, name=call.name, arguments=new_args))
             return ev.model_copy(update={"tool_calls": new_calls}), all_detections
         if isinstance(ev, ToolResultEvent):
-            new_text, det = self.redact_text(
-                ev.content, memo=memo, category_counts=category_counts
-            )
+            new_text, det = self.redact_text(ev.content, memo=memo, category_counts=category_counts)
             all_detections.extend(det)
             return ev.model_copy(update={"content": new_text}), all_detections
         if isinstance(ev, ErrorEvent):
-            new_msg, det = self.redact_text(
-                ev.message, memo=memo, category_counts=category_counts
-            )
+            new_msg, det = self.redact_text(ev.message, memo=memo, category_counts=category_counts)
             all_detections.extend(det)
             return ev.model_copy(update={"message": new_msg}), all_detections
         return ev, all_detections
@@ -238,6 +228,4 @@ def redact_trajectory(
     record_for_audit: bool = False,
 ) -> RedactionResult:
     """Convenience: stateless wrapper around ``Redactor.redact_trajectory``."""
-    return Redactor(rules=rules).redact_trajectory(
-        trajectory, record_for_audit=record_for_audit
-    )
+    return Redactor(rules=rules).redact_trajectory(trajectory, record_for_audit=record_for_audit)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -30,11 +29,7 @@ from training_pipeline.validate.splits import (
 def sample_registry(tmp_path: Path) -> ToolRegistry:
     p = tmp_path / "tools.yaml"
     p.write_text(
-        "tools:\n"
-        "  soil_sensor:\n"
-        "    required: [plot]\n"
-        "    properties:\n"
-        "      plot: string\n",
+        "tools:\n  soil_sensor:\n    required: [plot]\n    properties:\n      plot: string\n",
         encoding="utf-8",
     )
     return ToolRegistry.from_yaml(p)
@@ -120,7 +115,13 @@ def test_consistency_unresolved_call():
 def test_near_duplicate_within_set():
     a = Trajectory(
         session_id="s1",
-        events=[UserEvent(event_id="u", session_id="s1", content="The quick brown fox jumps over the lazy dog.")],
+        events=[
+            UserEvent(
+                event_id="u",
+                session_id="s1",
+                content="The quick brown fox jumps over the lazy dog.",
+            )
+        ],
     )
     b = Trajectory(
         session_id="s2",
@@ -143,7 +144,9 @@ def test_split_integrity_no_leak_when_disjoint():
     )
     b = Trajectory(
         session_id="b",
-        events=[UserEvent(event_id="u", session_id="b", content="completely different content here")],
+        events=[
+            UserEvent(event_id="u", session_id="b", content="completely different content here")
+        ],
     )
     report = split_integrity_report({"train": [a], "val": [b]}, threshold=0.85)
     assert report["total_leaks"] == 0

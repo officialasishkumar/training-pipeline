@@ -69,7 +69,8 @@ def detect_source(record: dict[str, Any]) -> str:
                 ):
                     return "anthropic"
                 if any(
-                    isinstance(m, dict) and m.get("role") in ("tool", "assistant")
+                    isinstance(m, dict)
+                    and m.get("role") in ("tool", "assistant")
                     and (m.get("tool_calls") is not None or m.get("tool_call_id") is not None)
                     for m in msgs
                 ):
@@ -168,9 +169,7 @@ def from_openai_chat(record: dict[str, Any]) -> Trajectory:
         content_str = "" if content is None else str(content)
         if role == "user":
             events.append(
-                UserEvent(
-                    event_id=evt_id, session_id=sid, timestamp=ts, content=content_str
-                )
+                UserEvent(event_id=evt_id, session_id=sid, timestamp=ts, content=content_str)
             )
         elif role == "assistant":
             tool_calls_raw = msg.get("tool_calls") or []
@@ -187,9 +186,7 @@ def from_openai_chat(record: dict[str, Any]) -> Trajectory:
                     )
                 calls = [_openai_tool_call(tc) for tc in tool_calls_raw]
                 events.append(
-                    ToolCallEvent(
-                        event_id=evt_id, session_id=sid, timestamp=ts, tool_calls=calls
-                    )
+                    ToolCallEvent(event_id=evt_id, session_id=sid, timestamp=ts, tool_calls=calls)
                 )
             else:
                 events.append(

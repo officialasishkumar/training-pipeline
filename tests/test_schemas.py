@@ -8,8 +8,6 @@ import pytest
 from pydantic import ValidationError
 
 from training_pipeline.schemas.events import (
-    AssistantEvent,
-    ToolCall,
     ToolCallEvent,
     ToolResultEvent,
     Trajectory,

@@ -8,8 +8,8 @@ catching minor rewordings without false-positive overload.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from training_pipeline.schemas.events import Trajectory, UserEvent

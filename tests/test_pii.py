@@ -4,20 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from training_pipeline.pii.audit import AuditSampler
 from training_pipeline.pii.redactor import Redactor, redact_trajectory
 from training_pipeline.pii.rules import (
-    BUILTIN_RULES,
     detect_all,
     load_rules,
 )
 from training_pipeline.schemas.events import (
-    AssistantEvent,
     ToolCall,
     ToolCallEvent,
-    ToolResultEvent,
     Trajectory,
     UserEvent,
 )
@@ -65,7 +60,6 @@ def test_pan_detection():
 def test_redactor_consistent_placeholders():
     r = Redactor()
     out, _ = r.redact_text("Email me at a@b.com")
-    out2, _ = r.redact_text("Email a@b.com again")
     assert "a@b.com" not in out
     # Run inside a single shared memo to check stability.
     memo: dict[str, str] = {}
@@ -135,10 +129,7 @@ def test_audit_sampler_is_deterministic():
 def test_load_rules_extends_builtins(tmp_path: Path):
     p = tmp_path / "rules.yaml"
     p.write_text(
-        "rules:\n"
-        "  - name: emp_id\n"
-        "    category: INTERNAL_ID\n"
-        "    pattern: 'EMP-\\d{6}'\n",
+        "rules:\n  - name: emp_id\n    category: INTERNAL_ID\n    pattern: 'EMP-\\d{6}'\n",
         encoding="utf-8",
     )
     rules = load_rules(p)

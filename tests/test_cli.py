@@ -47,9 +47,7 @@ def test_version(runner: CliRunner):
 
 def test_ingest_writes_canonical(runner: CliRunner, sample_logs: Path, tmp_path: Path):
     out = tmp_path / "canon.jsonl"
-    result = runner.invoke(
-        app, ["ingest", "--input", str(sample_logs), "--output", str(out)]
-    )
+    result = runner.invoke(app, ["ingest", "--input", str(sample_logs), "--output", str(out)])
     assert result.exit_code == 0, result.stdout
     assert out.exists()
     rec = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
@@ -60,9 +58,7 @@ def test_redact_replaces_email(runner: CliRunner, sample_logs: Path, tmp_path: P
     canon = tmp_path / "canon.jsonl"
     runner.invoke(app, ["ingest", "--input", str(sample_logs), "--output", str(canon)])
     out = tmp_path / "redacted.jsonl"
-    result = runner.invoke(
-        app, ["redact", "--input", str(canon), "--output", str(out)]
-    )
+    result = runner.invoke(app, ["redact", "--input", str(canon), "--output", str(out)])
     assert result.exit_code == 0, result.stdout
     text = out.read_text(encoding="utf-8")
     assert "@example.com" not in text

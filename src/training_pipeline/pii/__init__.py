@@ -11,8 +11,8 @@ from training_pipeline.pii.rules import (
 )
 
 __all__ = [
-    "AuditSampler",
     "BUILTIN_RULES",
+    "AuditSampler",
     "PIIDetection",
     "PIIRule",
     "RedactionResult",

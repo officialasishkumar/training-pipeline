@@ -20,10 +20,9 @@ the same code paths are tested by ``pytest`` and exercised in production.
 from __future__ import annotations
 
 import logging
-import sys
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -31,7 +30,7 @@ from rich.table import Table
 
 from training_pipeline import __version__
 from training_pipeline.config import load_pipeline_config
-from training_pipeline.export.dpo import DPOPairStrategy, export_dpo_jsonl
+from training_pipeline.export.dpo import DPOPairStrategy
 from training_pipeline.export.sft import iter_sft_records
 from training_pipeline.export.shards import ShardWriter, write_dataset_card
 from training_pipeline.ingest.normalizer import NormalizationError, normalize_records
@@ -90,11 +89,11 @@ def ingest(
     input: Annotated[Path, typer.Option("--input", "-i", help="File or directory of raw logs")],
     output: Annotated[Path, typer.Option("--output", "-o", help="Canonical JSONL output")],
     source: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--source", "-s", help="Force a source adapter (default: auto)"),
     ] = None,
     quarantine: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--quarantine", "-q", help="Where to write records that failed to normalize"),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
@@ -140,9 +139,9 @@ def redact(
     input: Annotated[Path, typer.Option("--input", "-i")],
     output: Annotated[Path, typer.Option("--output", "-o")],
     rules: Annotated[
-        Optional[Path], typer.Option("--rules", help="YAML rule file (extends built-ins)")
+        Path | None, typer.Option("--rules", help="YAML rule file (extends built-ins)")
     ] = None,
-    audit: Annotated[Optional[Path], typer.Option("--audit", help="Audit JSONL output")] = None,
+    audit: Annotated[Path | None, typer.Option("--audit", help="Audit JSONL output")] = None,
     audit_rate: Annotated[float, typer.Option("--audit-rate")] = 0.05,
     audit_seed: Annotated[int, typer.Option("--audit-seed")] = 0,
     audit_cap: Annotated[int, typer.Option("--audit-cap")] = 1000,
@@ -212,15 +211,15 @@ def tag(
 def validate(
     input: Annotated[Path, typer.Option("--input", "-i")],
     tool_registry: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--tool-registry", help="YAML registry of valid tools and arg schemas"),
     ] = None,
     issues_output: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--issues-output", help="Write all issues to this JSONL"),
     ] = None,
     output: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option(
             "--output",
             help="If set, write trajectories *without* errors to this JSONL (drop-on-error).",
@@ -298,7 +297,7 @@ def split(
     ] = (0.8, 0.1, 0.1),
     seed: Annotated[int, typer.Option("--seed")] = 0,
     keys: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         typer.Option("--key", "-k", help="Stratification keys (repeatable)"),
     ] = None,
     threshold: Annotated[float, typer.Option("--near-duplicate-threshold")] = 0.85,
@@ -354,7 +353,7 @@ def export_sft_cmd(
     input: Annotated[Path, typer.Option("--input", "-i")],
     output_dir: Annotated[Path, typer.Option("--output-dir", "-o")],
     template: Annotated[str, typer.Option("--template")] = "chatml",
-    system_prompt: Annotated[Optional[str], typer.Option("--system-prompt")] = None,
+    system_prompt: Annotated[str | None, typer.Option("--system-prompt")] = None,
     shard_size: Annotated[int, typer.Option("--shard-size")] = 5000,
     compress: Annotated[bool, typer.Option("--compress")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
@@ -389,7 +388,7 @@ def export_dpo_cmd(
     input: Annotated[Path, typer.Option("--input", "-i")],
     output_dir: Annotated[Path, typer.Option("--output-dir", "-o")],
     strategy: Annotated[str, typer.Option("--strategy")] = "feedback",
-    system_prompt: Annotated[Optional[str], typer.Option("--system-prompt")] = None,
+    system_prompt: Annotated[str | None, typer.Option("--system-prompt")] = None,
     shard_size: Annotated[int, typer.Option("--shard-size")] = 5000,
     compress: Annotated[bool, typer.Option("--compress")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
@@ -400,7 +399,7 @@ def export_dpo_cmd(
     # We need a sharded writer but DPO records flow from export_dpo_jsonl;
     # implement sharding via a generator + ShardWriter directly.
     from training_pipeline.export.dpo import (
-        _from_failure_recovery,  # noqa: SLF001 - intentional reuse
+        _from_failure_recovery,
         _from_feedback,
     )
 
@@ -418,9 +417,7 @@ def export_dpo_cmd(
             elif strat is DPOPairStrategy.FAILURE_RECOVERY:
                 rows = _from_failure_recovery(traj, system_prompt=system_prompt)
             else:
-                console.print(
-                    f"[red]export dpo:[/red] strategy {strategy!r} not supported via CLI"
-                )
+                console.print(f"[red]export dpo:[/red] strategy {strategy!r} not supported via CLI")
                 raise typer.Exit(code=2)
             for record in rows:
                 writer.write(record)
@@ -512,7 +509,7 @@ def eval(
         Path,
         typer.Option("--eval-set", help="JSONL of eval prompts and ground-truth tool calls"),
     ],
-    report: Annotated[Optional[Path], typer.Option("--report")] = None,
+    report: Annotated[Path | None, typer.Option("--report")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Compare teacher and student outputs on a held-out eval set."""

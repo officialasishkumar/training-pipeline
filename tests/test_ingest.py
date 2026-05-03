@@ -16,14 +16,11 @@ from training_pipeline.ingest import (
     normalize_record,
     write_jsonl,
 )
-from training_pipeline.ingest.normalizer import NormalizationError, normalize_records
+from training_pipeline.ingest.normalizer import normalize_records
 from training_pipeline.ingest.sources import known_sources
 from training_pipeline.schemas.events import (
-    AssistantEvent,
     ToolCallEvent,
-    ToolResultEvent,
     Trajectory,
-    UserEvent,
 )
 
 
@@ -84,10 +81,7 @@ def test_detect_anthropic(anthropic_record: dict[str, Any]):
 
 
 def test_detect_generic_chat_for_plain_messages():
-    assert (
-        detect_source({"messages": [{"role": "user", "content": "hi"}]})
-        == "generic_chat"
-    )
+    assert detect_source({"messages": [{"role": "user", "content": "hi"}]}) == "generic_chat"
 
 
 def test_detect_canonical():

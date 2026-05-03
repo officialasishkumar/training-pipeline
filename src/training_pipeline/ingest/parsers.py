@@ -43,9 +43,7 @@ def iter_jsonl(path: str | os.PathLike[str], *, strict: bool = False) -> Iterato
                 continue
 
 
-def iter_records(
-    path: str | os.PathLike[str], *, strict: bool = False
-) -> Iterator[dict[str, Any]]:
+def iter_records(path: str | os.PathLike[str], *, strict: bool = False) -> Iterator[dict[str, Any]]:
     """Yield records from a path that is either a file or a directory.
 
     Directories are walked recursively; both ``.jsonl`` and ``.jsonl.gz``
@@ -95,10 +93,7 @@ def write_jsonl(
     p.parent.mkdir(parents=True, exist_ok=True)
     mode = "ab" if append else "wb"
     count = 0
-    if p.suffix == ".gz":
-        opener = gzip.open(p, mode)
-    else:
-        opener = p.open(mode)
+    opener = gzip.open(p, mode) if p.suffix == ".gz" else p.open(mode)  # noqa: SIM115
     with opener as fh:
         for record in records:
             payload = record

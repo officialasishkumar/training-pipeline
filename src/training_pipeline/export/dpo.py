@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import enum
 import logging
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from training_pipeline.export.sft import trajectory_to_messages
 from training_pipeline.ingest.parsers import write_jsonl
@@ -55,9 +55,7 @@ def build_dpo_record(
     )
 
 
-def _from_feedback(
-    traj: Trajectory, *, system_prompt: str | None
-) -> Iterator[DPORecord]:
+def _from_feedback(traj: Trajectory, *, system_prompt: str | None) -> Iterator[DPORecord]:
     """Read DPO pairs from ``trajectory.tags['feedback_pairs']``.
 
     Each entry is expected to be:
@@ -113,9 +111,7 @@ def _from_feedback(
         )
 
 
-def _from_failure_recovery(
-    traj: Trajectory, *, system_prompt: str | None
-) -> Iterator[DPORecord]:
+def _from_failure_recovery(traj: Trajectory, *, system_prompt: str | None) -> Iterator[DPORecord]:
     """Within an agent trace, treat post-recovery assistant text as chosen and
     the pre-recovery (failed) tool-call expression as rejected.
 
@@ -183,7 +179,9 @@ def _from_failure_recovery(
         )
 
 
-SyntheticGenerator = Callable[[Trajectory, list[SFTMessage]], list[tuple[list[SFTMessage], list[SFTMessage]]]]
+SyntheticGenerator = Callable[
+    [Trajectory, list[SFTMessage]], list[tuple[list[SFTMessage], list[SFTMessage]]]
+]
 
 
 def export_dpo_jsonl(
@@ -199,9 +197,7 @@ def export_dpo_jsonl(
     rows: Iterator[DPORecord]
     if strat is DPOPairStrategy.FEEDBACK:
         rows = (
-            r
-            for traj in trajectories
-            for r in _from_feedback(traj, system_prompt=system_prompt)
+            r for traj in trajectories for r in _from_feedback(traj, system_prompt=system_prompt)
         )
     elif strat is DPOPairStrategy.FAILURE_RECOVERY:
         rows = (
@@ -211,9 +207,7 @@ def export_dpo_jsonl(
         )
     elif strat is DPOPairStrategy.SYNTHETIC:
         if synthetic_generator is None:
-            raise ValueError(
-                "synthetic_generator must be provided for the synthetic strategy"
-            )
+            raise ValueError("synthetic_generator must be provided for the synthetic strategy")
 
         def _gen() -> Iterator[DPORecord]:
             for traj in trajectories:

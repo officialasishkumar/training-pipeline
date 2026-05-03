@@ -77,9 +77,7 @@ def test_compare_outputs_basic(tmp_path: Path):
     eval_path.write_text("\n".join(json.dumps(r) for r in eval_set))
     student_path.write_text("\n".join(json.dumps(r) for r in student))
     teacher_path.write_text("\n".join(json.dumps(r) for r in teacher))
-    summary = compare_outputs(
-        student=student_path, teacher=teacher_path, eval_set=eval_path
-    )
+    summary = compare_outputs(student=student_path, teacher=teacher_path, eval_set=eval_path)
     assert summary["n_prompts"] == 1
     assert summary["metrics"]["tool_name_accuracy"]["student"] == 1.0
     assert summary["summary"]["student_acceptable"] is True
@@ -95,9 +93,7 @@ def test_compare_outputs_flags_regression(tmp_path: Path):
         }
         for i in range(10)
     ]
-    student = [
-        {"prompt_id": f"p{i}", "tool_calls": [], "text": "wrong"} for i in range(10)
-    ]
+    student = [{"prompt_id": f"p{i}", "tool_calls": [], "text": "wrong"} for i in range(10)]
     teacher = [
         {
             "prompt_id": f"p{i}",
@@ -112,8 +108,6 @@ def test_compare_outputs_flags_regression(tmp_path: Path):
     eval_path.write_text("\n".join(json.dumps(r) for r in eval_set))
     student_path.write_text("\n".join(json.dumps(r) for r in student))
     teacher_path.write_text("\n".join(json.dumps(r) for r in teacher))
-    summary = compare_outputs(
-        student=student_path, teacher=teacher_path, eval_set=eval_path
-    )
+    summary = compare_outputs(student=student_path, teacher=teacher_path, eval_set=eval_path)
     assert summary["summary"]["student_acceptable"] is False
     assert "tool_name_accuracy" in summary["summary"]["regressed_metrics"]

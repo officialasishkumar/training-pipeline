@@ -14,9 +14,8 @@ from __future__ import annotations
 import hashlib
 import random
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
 
 from training_pipeline.schemas.events import Trajectory
 
@@ -87,8 +86,8 @@ def stratified_split(
         local = list(indices)
         rng.shuffle(local)
         n = len(local)
-        n_train = int(round(n * fractions[0]))
-        n_val = int(round(n * fractions[1]))
+        n_train = round(n * fractions[0])
+        n_val = round(n * fractions[1])
         # Anything left goes to test so totals add up exactly.
         n_test = max(0, n - n_train - n_val)
         train.extend(local[:n_train])

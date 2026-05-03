@@ -31,9 +31,7 @@ class NormalizationError:
     record: dict[str, Any]
 
 
-def normalize_record(
-    record: dict[str, Any], *, source: str | None = None
-) -> Trajectory:
+def normalize_record(record: dict[str, Any], *, source: str | None = None) -> Trajectory:
     """Convert one raw record to a Trajectory.
 
     If ``source`` is ``None`` the adapter is sniffed from the record shape.
@@ -54,12 +52,14 @@ def normalize_records(
     for i, rec in enumerate(records):
         try:
             yield normalize_record(rec, source=source)
-        except Exception as exc:  # noqa: BLE001 - we surface every failure
+        except Exception as exc:
             log.warning("normalize failed at record %d: %s", i, exc)
             yield NormalizationError(index=i, error=str(exc), record=rec)
 
 
-def normalize_session(records: Iterable[dict[str, Any]], *, source: str | None = None) -> Trajectory:
+def normalize_session(
+    records: Iterable[dict[str, Any]], *, source: str | None = None
+) -> Trajectory:
     """Convenience: normalize a single record and return the trajectory.
 
     Raises if normalization fails.

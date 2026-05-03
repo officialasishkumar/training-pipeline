@@ -120,9 +120,7 @@ def test_dpo_feedback_strategy(tmp_path: Path):
 
 def test_dpo_failure_recovery_strategy(agent_trajectory: Trajectory, tmp_path: Path):
     p = tmp_path / "dpo.jsonl"
-    n = export_dpo_jsonl(
-        [agent_trajectory], p, strategy=DPOPairStrategy.FAILURE_RECOVERY
-    )
+    n = export_dpo_jsonl([agent_trajectory], p, strategy=DPOPairStrategy.FAILURE_RECOVERY)
     assert n >= 1
     rec = json.loads(p.read_text(encoding="utf-8").splitlines()[0])
     assert rec["chosen"]

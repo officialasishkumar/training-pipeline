@@ -2,17 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pytest
 
 from training_pipeline.schemas.events import (
-    AssistantEvent,
-    ToolCall,
-    ToolCallEvent,
-    ToolResultEvent,
     Trajectory,
-    UserEvent,
 )
 from training_pipeline.tagging.complexity import (
     classify_complexity,
@@ -69,9 +62,7 @@ def test_stratified_split_balances_strata(qa_trajectory: Trajectory, agent_traje
     s = stratified_split(items, fractions=(0.7, 0.15, 0.15), seed=1)
     assert len(s.train) + len(s.val) + len(s.test) == len(items)
     # Both strata should have at least one item in train.
-    train_strata = {
-        stratum_key(items[i]) for i in s.train
-    }
+    train_strata = {stratum_key(items[i]) for i in s.train}
     assert len(train_strata) == 2
 
 

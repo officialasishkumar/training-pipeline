@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -111,7 +111,7 @@ class ErrorEvent(_BaseEvent):
 
 
 Event = Annotated[
-    Union[UserEvent, AssistantEvent, ToolCallEvent, ToolResultEvent, ErrorEvent],
+    UserEvent | AssistantEvent | ToolCallEvent | ToolResultEvent | ErrorEvent,
     Field(discriminator="kind"),
 ]
 """A discriminated union of every concrete event type."""
@@ -150,10 +150,9 @@ class Trajectory(BaseModel):
             prev_ts = ev.timestamp
             if isinstance(ev, ToolCallEvent):
                 seen_call_ids.update(c.id for c in ev.tool_calls)
-            elif isinstance(ev, ToolResultEvent):
-                if ev.tool_call_id not in seen_call_ids:
-                    # Allow it but flag — the validate stage will catch it.
-                    self.tags.setdefault("dangling_tool_results", []).append(ev.event_id)
+            elif isinstance(ev, ToolResultEvent) and ev.tool_call_id not in seen_call_ids:
+                # Allow it but flag — the validate stage will catch it.
+                self.tags.setdefault("dangling_tool_results", []).append(ev.event_id)
         return self
 
     def num_steps(self) -> int:

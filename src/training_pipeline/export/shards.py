@@ -60,7 +60,7 @@ class ShardWriter:
         if self._fh is not None:
             self._fh.close()
         path = self.output_dir / f"{self.prefix}-{self._shard_idx:05d}{self.suffix}"
-        self._fh = gzip.open(path, "ab") if self.compress else path.open("ab")
+        self._fh = gzip.open(path, "ab") if self.compress else path.open("ab")  # noqa: SIM115
         self._row_idx = 0
 
     def write(self, record: Any) -> None:

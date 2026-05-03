@@ -21,8 +21,8 @@ from training_pipeline.export.templates import (
 )
 
 __all__ = [
-    "DPOPairStrategy",
     "KNOWN_TEMPLATES",
+    "DPOPairStrategy",
     "ShardWriter",
     "apply_template",
     "build_dpo_record",

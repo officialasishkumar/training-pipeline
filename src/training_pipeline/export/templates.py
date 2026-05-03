@@ -13,7 +13,8 @@ strings are useful for:
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from jinja2 import Environment
 
@@ -83,9 +84,7 @@ KNOWN_TEMPLATES: dict[str, str] = {
 
 def template_for(name: str) -> str:
     if name not in KNOWN_TEMPLATES:
-        raise KeyError(
-            f"Unknown chat template {name!r}. Known: {sorted(KNOWN_TEMPLATES)}"
-        )
+        raise KeyError(f"Unknown chat template {name!r}. Known: {sorted(KNOWN_TEMPLATES)}")
     return KNOWN_TEMPLATES[name]
 
 
@@ -109,7 +108,6 @@ def apply_template(
     env.filters.setdefault("tojson", lambda v, **kw: json.dumps(v, default=str))
     tpl = env.from_string(template_src)
     msg_list = [
-        m.model_dump(exclude_none=False) if isinstance(m, SFTMessage) else m
-        for m in messages
+        m.model_dump(exclude_none=False) if isinstance(m, SFTMessage) else m for m in messages
     ]
     return tpl.render(messages=msg_list, add_generation_prompt=add_generation_prompt)

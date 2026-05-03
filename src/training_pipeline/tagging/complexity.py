@@ -14,7 +14,7 @@ model is available.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from training_pipeline.schemas.events import (
@@ -24,7 +24,6 @@ from training_pipeline.schemas.events import (
     Trajectory,
     UserEvent,
 )
-
 
 ComplexityBand = Literal["trivial", "easy", "medium", "hard", "extreme"]
 
@@ -79,9 +78,7 @@ _AMBIGUITY_HINTS: tuple[str, ...] = (
 
 def _ambiguity_score(trajectory: Trajectory) -> float:
     """Cheap proxy: count ambiguity markers normalized by user turn length."""
-    user_text = " ".join(
-        e.content.lower() for e in trajectory.events if isinstance(e, UserEvent)
-    )
+    user_text = " ".join(e.content.lower() for e in trajectory.events if isinstance(e, UserEvent))
     if not user_text:
         return 0.0
     hits = sum(user_text.count(h) for h in _AMBIGUITY_HINTS)

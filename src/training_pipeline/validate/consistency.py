@@ -13,6 +13,7 @@ Three classes of issue we catch here:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -218,17 +219,14 @@ def validate_consistency(
                         ConsistencyIssue(
                             severity="warning",
                             code="NAME_MISMATCH",
-                            message=(
-                                f"Result names {ev.name!r} but call was {expected_name!r}"
-                            ),
+                            message=(f"Result names {ev.name!r} but call was {expected_name!r}"),
                             event_id=ev.event_id,
                         )
                     )
                 # Try to parse content as JSON; surface obvious garbage.
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     json.loads(ev.content)
-                except (ValueError, TypeError):
-                    pass  # tools often return plain text — not an issue
+                    # tools often return plain text — not an issue
         elif isinstance(ev, AssistantEvent) and last_result is not None:
             text = ev.content.lower()
             said_success = any(p in text for p in _SUCCESS_PHRASES)
@@ -238,9 +236,7 @@ def validate_consistency(
                     ConsistencyIssue(
                         severity="warning",
                         code="OBSERVATION_CONTRADICTION",
-                        message=(
-                            "Assistant claims success after a tool reported an error"
-                        ),
+                        message=("Assistant claims success after a tool reported an error"),
                         event_id=ev.event_id,
                         extra={"related_result": last_result.event_id},
                     )
@@ -250,9 +246,7 @@ def validate_consistency(
                     ConsistencyIssue(
                         severity="warning",
                         code="OBSERVATION_CONTRADICTION",
-                        message=(
-                            "Assistant claims failure after a tool returned without error"
-                        ),
+                        message=("Assistant claims failure after a tool returned without error"),
                         event_id=ev.event_id,
                         extra={"related_result": last_result.event_id},
                     )

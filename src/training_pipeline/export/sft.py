@@ -16,7 +16,6 @@ from typing import Any
 from training_pipeline.ingest.parsers import write_jsonl
 from training_pipeline.schemas.events import (
     AssistantEvent,
-    Event,
     ToolCallEvent,
     ToolResultEvent,
     Trajectory,
@@ -53,8 +52,7 @@ def trajectory_to_messages(
             pending_assistant_text = ev.content if ev.content else None
         elif isinstance(ev, ToolCallEvent):
             calls = [
-                SFTToolCall(id=c.id, name=c.name, arguments=c.arguments)
-                for c in ev.tool_calls
+                SFTToolCall(id=c.id, name=c.name, arguments=c.arguments) for c in ev.tool_calls
             ]
             msgs.append(
                 SFTMessage(
@@ -109,9 +107,7 @@ def iter_sft_records(
 ) -> Iterator[SFTRecord]:
     for traj in trajectories:
         try:
-            yield build_sft_record(
-                traj, system_prompt=system_prompt, extra_metadata=extra_metadata
-            )
+            yield build_sft_record(traj, system_prompt=system_prompt, extra_metadata=extra_metadata)
         except ValueError as exc:
             if not skip_invalid:
                 raise

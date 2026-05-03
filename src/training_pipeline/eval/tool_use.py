@@ -72,12 +72,17 @@ def score_tool_use(
             name_match += 1
         # Argument exact-match is per-turn (every gold call must be matched).
         if pred and gold and len(pred) == len(gold):
-            pred_sorted = sorted(pred, key=lambda c: (c.get("name", ""), _stringify_args(c.get("arguments", {}))))
-            gold_sorted = sorted(gold, key=lambda c: (c.get("name", ""), _stringify_args(c.get("arguments", {}))))
+            pred_sorted = sorted(
+                pred, key=lambda c: (c.get("name", ""), _stringify_args(c.get("arguments", {})))
+            )
+            gold_sorted = sorted(
+                gold, key=lambda c: (c.get("name", ""), _stringify_args(c.get("arguments", {})))
+            )
             if all(
                 p.get("name") == g.get("name")
-                and _stringify_args(p.get("arguments", {})) == _stringify_args(g.get("arguments", {}))
-                for p, g in zip(pred_sorted, gold_sorted)
+                and _stringify_args(p.get("arguments", {}))
+                == _stringify_args(g.get("arguments", {}))
+                for p, g in zip(pred_sorted, gold_sorted, strict=False)
             ):
                 arg_match += 1
         # Field recall: fraction of gold required fields present in prediction.

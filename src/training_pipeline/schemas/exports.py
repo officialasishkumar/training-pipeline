@@ -42,9 +42,8 @@ class SFTMessage(BaseModel):
                 raise ValueError("tool messages require tool_call_id")
             if self.content is None:
                 raise ValueError("tool messages require content")
-        if self.role == "assistant":
-            if self.content is None and not self.tool_calls:
-                raise ValueError("assistant messages need content or tool_calls")
+        if self.role == "assistant" and self.content is None and not self.tool_calls:
+            raise ValueError("assistant messages need content or tool_calls")
         if self.role in ("system", "user") and self.content is None:
             raise ValueError(f"{self.role} messages require content")
         return self
