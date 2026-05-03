@@ -1,0 +1,135 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "training-pipeline"
+version = "0.1.0"
+description = "Logs-to-training pipeline for agentic LLM setups: ingest, redact PII, tag trajectories, export SFT (LoRA) and DPO datasets."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Asish Kumar", email = "officialasishkumar@gmail.com" },
+]
+keywords = [
+    "llm",
+    "training",
+    "sft",
+    "dpo",
+    "lora",
+    "pii",
+    "agent",
+    "trajectory",
+    "openagrinet",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "pydantic>=2.5,<3",
+    "typer>=0.12,<1",
+    "rich>=13",
+    "pyyaml>=6",
+    "jinja2>=3.1",
+    "orjson>=3.9",
+    "datasketch>=1.6",
+    "regex>=2024.4",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+ner = [
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+]
+hf = [
+    "datasets>=2.16",
+    "transformers>=4.40",
+]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "pre-commit>=3.6",
+    "types-PyYAML",
+]
+
+[project.scripts]
+training-pipeline = "training_pipeline.cli:app"
+tp = "training_pipeline.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/officialasishkumar/training-pipeline"
+Repository = "https://github.com/officialasishkumar/training-pipeline"
+Issues = "https://github.com/officialasishkumar/training-pipeline/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/training_pipeline"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RUF", # ruff
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # function call in default argument (typer uses this pattern)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "N802"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:pkg_resources.*",
+    "ignore::DeprecationWarning:google.*",
+]
+
+[tool.coverage.run]
+source = ["training_pipeline"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+plugins = ["pydantic.mypy"]
