@@ -1,5 +1,10 @@
 # training-pipeline
 
+[![CI](https://github.com/officialasishkumar/training-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/officialasishkumar/training-pipeline/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-black)](https://github.com/astral-sh/ruff)
+
 A documented, repeatable pipeline that turns production LLM logs (Q&A and agentic trajectories) into training-ready datasets for **supervised fine-tuning (LoRA-friendly)** and **Direct Preference Optimization (DPO)**.
 
 Built for the [OpenAgriNet](https://github.com/OpenAgriNet) project under [DMP 2026](https://github.com/OpenAgriNet/training_setup_logs/issues/1) but designed to be domain-agnostic.
