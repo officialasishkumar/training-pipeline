@@ -17,9 +17,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from typing_extensions import Self
-
 import orjson
+from typing_extensions import Self
 
 log = logging.getLogger(__name__)
 
