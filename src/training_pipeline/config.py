@@ -47,7 +47,7 @@ class TagConfig(BaseModel):
     output: str = "build/tagged.jsonl"
 
 
-class ValidateConfig(BaseModel):
+class ValidationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     input: str = "build/tagged.jsonl"
@@ -93,13 +93,17 @@ class SplitConfig(BaseModel):
 class PipelineConfig(BaseModel):
     """Full pipeline config (every stage)."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     name: str = "training-pipeline-run"
     ingest: IngestConfig
     pii: PIIConfig = Field(default_factory=PIIConfig)
     tag: TagConfig = Field(default_factory=TagConfig)
-    validate: ValidateConfig = Field(default_factory=ValidateConfig)
+    validation: ValidationConfig = Field(
+        default_factory=ValidationConfig,
+        validation_alias="validate",
+        serialization_alias="validate",
+    )
     split: SplitConfig = Field(default_factory=SplitConfig)
     sft: SFTExportConfig = Field(default_factory=SFTExportConfig)
     dpo: DPOExportConfig = Field(default_factory=DPOExportConfig)

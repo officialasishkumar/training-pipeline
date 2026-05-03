@@ -126,7 +126,7 @@ class Redactor:
         """Stable placeholder for a single detection."""
         if self.consistent_placeholders and d.text in memo:
             return memo[d.text]
-        category_counts[d.category] += 1
+        category_counts[d.category] = category_counts.get(d.category, 0) + 1
         n = sum(1 for v in memo.values() if v.startswith(f"[{d.category}_"))
         token = f"[{d.category}_{n + 1}]"
         memo[d.text] = token

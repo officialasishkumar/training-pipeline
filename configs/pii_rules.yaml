@@ -1,0 +1,17 @@
+# Custom PII rules layered on top of built-ins.
+# To skip built-ins entirely, set `include_builtins: false`.
+
+include_builtins: true
+
+rules:
+  - name: kvk_id
+    category: INTERNAL_ID
+    pattern: 'KVK-\d{4,6}'
+    placeholder: '[KVK_ID]'
+    description: Krishi Vigyan Kendra registration ids.
+
+  - name: farmer_id
+    category: INTERNAL_ID
+    pattern: 'FARMER-[A-Z]{2}\d{6,8}'
+    placeholder: '[FARMER_ID]'
+    description: Farmer registration id used in OpenAgriNet logs.

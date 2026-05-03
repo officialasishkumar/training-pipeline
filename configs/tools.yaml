@@ -1,0 +1,34 @@
+# Tool registry used by `tp validate` to verify tool calls in trajectories.
+# Add or override tools to fit your deployment.
+
+tools:
+  soil_sensor:
+    description: Read soil moisture and temperature for a coordinate.
+    required: [lat, lng]
+    properties:
+      lat: number
+      lng: number
+      depth_cm: integer
+
+  weather_forecast:
+    description: Multi-day weather forecast for a coordinate.
+    required: [lat, lng, days]
+    properties:
+      lat: number
+      lng: number
+      days: integer
+
+  mandi_price:
+    description: Latest mandi prices for a commodity in a given market.
+    required: [commodity, market]
+    properties:
+      commodity: string
+      market: string
+
+  pest_reports:
+    description: Recent pest reports filed in a given district.
+    required: [district]
+    properties:
+      district: string
+      days: integer
+      crop: string

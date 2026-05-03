@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
-from jinja2 import Environment, StrictUndefined
+from jinja2 import Environment
 
 from training_pipeline.schemas.exports import SFTMessage
 
@@ -95,15 +95,21 @@ def apply_template(
     template: str = "chatml",
     add_generation_prompt: bool = False,
 ) -> str:
-    """Render messages with the named template (or a raw template string)."""
+    """Render messages with the named template (or a raw template string).
+
+    Renders with ``None`` fields preserved so templates can branch on them
+    (``{% if m.tool_calls %}``). Strict-undefined is intentionally off here:
+    real-world chat templates often access optional fields and tolerating
+    missing keys keeps custom templates usable.
+    """
     template_src = (
         KNOWN_TEMPLATES.get(template, template) if template in KNOWN_TEMPLATES else template
     )
-    env = Environment(undefined=StrictUndefined, autoescape=False)
+    env = Environment(autoescape=False)
     env.filters.setdefault("tojson", lambda v, **kw: json.dumps(v, default=str))
     tpl = env.from_string(template_src)
     msg_list = [
-        m.model_dump(exclude_none=True) if isinstance(m, SFTMessage) else m
+        m.model_dump(exclude_none=False) if isinstance(m, SFTMessage) else m
         for m in messages
     ]
     return tpl.render(messages=msg_list, add_generation_prompt=add_generation_prompt)

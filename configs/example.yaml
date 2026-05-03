@@ -1,0 +1,54 @@
+# Full pipeline config — exercise every stage on the bundled samples.
+# Run with: tp run --config configs/example.yaml
+
+name: openagrinet-prototype
+
+ingest:
+  input: examples/sample_logs/
+  output: build/canonical.jsonl
+  source: null  # auto-detect per record
+  quarantine: build/quarantine.jsonl
+
+pii:
+  input: build/canonical.jsonl
+  output: build/redacted.jsonl
+  rules_file: null  # use built-ins
+  audit_output: build/audit_sample.jsonl
+  audit_rate: 0.10
+  audit_seed: 0
+  audit_cap: 100
+
+tag:
+  input: build/redacted.jsonl
+  output: build/tagged.jsonl
+
+validate:
+  input: build/tagged.jsonl
+  tool_registry: configs/tools.yaml
+  drop_on_error: false
+  output: build/validated.jsonl
+  issues_output: build/validation_issues.jsonl
+
+split:
+  input: build/tagged.jsonl
+  output_dir: build/splits
+  fractions: [0.7, 0.15, 0.15]
+  seed: 42
+  keys: [complexity_band, domain]
+  near_duplicate_threshold: 0.85
+
+sft:
+  input: build/tagged.jsonl
+  output_dir: build/sft
+  template: chatml
+  system_prompt: "You are an OpenAgriNet assistant for Indian farmers."
+  shard_size: 1000
+  compress: false
+
+dpo:
+  input: build/tagged.jsonl
+  output_dir: build/dpo
+  strategy: feedback
+  system_prompt: "You are an OpenAgriNet assistant for Indian farmers."
+  shard_size: 1000
+  compress: false

@@ -473,10 +473,12 @@ def run(
     )
     console.print("[4/6] validate")
     validate(
-        input=Path(cfg.validate.input),
-        tool_registry=Path(cfg.validate.tool_registry) if cfg.validate.tool_registry else None,
-        issues_output=Path(cfg.validate.issues_output) if cfg.validate.issues_output else None,
-        output=Path(cfg.validate.output) if cfg.validate.output and cfg.validate.drop_on_error else None,
+        input=Path(cfg.validation.input),
+        tool_registry=Path(cfg.validation.tool_registry) if cfg.validation.tool_registry else None,
+        issues_output=Path(cfg.validation.issues_output) if cfg.validation.issues_output else None,
+        output=Path(cfg.validation.output)
+        if cfg.validation.output and cfg.validation.drop_on_error
+        else None,
         verbose=verbose,
     )
     console.print("[5/6] export sft")

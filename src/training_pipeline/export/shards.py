@@ -65,7 +65,7 @@ class ShardWriter:
 
     def write(self, record: Any) -> None:
         if hasattr(record, "model_dump"):
-            payload = record.model_dump(mode="json", exclude_none=False)
+            payload = record.model_dump(mode="json", exclude_none=True)
         else:
             payload = record
         line = orjson.dumps(payload, option=orjson.OPT_APPEND_NEWLINE)

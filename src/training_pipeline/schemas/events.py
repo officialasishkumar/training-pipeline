@@ -56,11 +56,13 @@ class _BaseEvent(BaseModel):
 
 
 class UserEvent(_BaseEvent):
+    kind: Literal["user"] = "user"
     role: Literal[EventRole.USER] = EventRole.USER
     content: str
 
 
 class AssistantEvent(_BaseEvent):
+    kind: Literal["assistant"] = "assistant"
     role: Literal[EventRole.ASSISTANT] = EventRole.ASSISTANT
     content: str = ""
     # When the assistant emits both text and tool calls, the content is the text
@@ -79,8 +81,8 @@ class ToolCall(BaseModel):
 
 
 class ToolCallEvent(_BaseEvent):
-    role: Literal[EventRole.ASSISTANT] = EventRole.ASSISTANT
     kind: Literal["tool_call"] = "tool_call"
+    role: Literal[EventRole.ASSISTANT] = EventRole.ASSISTANT
     tool_calls: list[ToolCall]
 
     @field_validator("tool_calls")
@@ -92,6 +94,7 @@ class ToolCallEvent(_BaseEvent):
 
 
 class ToolResultEvent(_BaseEvent):
+    kind: Literal["tool_result"] = "tool_result"
     role: Literal[EventRole.TOOL] = EventRole.TOOL
     tool_call_id: str = Field(..., description="Matches ToolCall.id from a prior ToolCallEvent")
     name: str
@@ -100,6 +103,7 @@ class ToolResultEvent(_BaseEvent):
 
 
 class ErrorEvent(_BaseEvent):
+    kind: Literal["error"] = "error"
     role: Literal[EventRole.ERROR] = EventRole.ERROR
     error_type: str
     message: str
@@ -108,7 +112,7 @@ class ErrorEvent(_BaseEvent):
 
 Event = Annotated[
     Union[UserEvent, AssistantEvent, ToolCallEvent, ToolResultEvent, ErrorEvent],
-    Field(discriminator="role"),
+    Field(discriminator="kind"),
 ]
 """A discriminated union of every concrete event type."""
 

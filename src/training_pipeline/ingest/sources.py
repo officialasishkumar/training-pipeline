@@ -145,6 +145,7 @@ def from_generic_chat(record: dict[str, Any]) -> Trajectory:
         events=events,
         source=record.get("source", "generic_chat"),
         domain=record.get("domain"),
+        tags=dict(record.get("tags") or {}),
     )
 
 
@@ -217,6 +218,7 @@ def from_openai_chat(record: dict[str, Any]) -> Trajectory:
         events=events,
         source=record.get("source", "openai_chat"),
         domain=record.get("domain"),
+        tags=dict(record.get("tags") or {}),
     )
 
 
@@ -324,6 +326,7 @@ def from_anthropic(record: dict[str, Any]) -> Trajectory:
         events=events,
         source=record.get("source", "anthropic"),
         domain=record.get("domain"),
+        tags=dict(record.get("tags") or {}),
     )
 
 

@@ -81,8 +81,13 @@ def write_jsonl(
     records: Iterable[Any],
     *,
     append: bool = False,
+    exclude_none: bool = True,
 ) -> int:
     """Write an iterable of records (dicts or Pydantic models) to JSONL.
+
+    By default ``None`` fields are dropped — chat templates and trainers
+    typically prefer absent keys to explicit nulls. Pass ``exclude_none=False``
+    to keep them.
 
     Returns the number of records written. Parent directories are created.
     """
@@ -98,7 +103,7 @@ def write_jsonl(
         for record in records:
             payload = record
             if hasattr(record, "model_dump"):
-                payload = record.model_dump(mode="json", exclude_none=False)
+                payload = record.model_dump(mode="json", exclude_none=exclude_none)
             line = orjson.dumps(payload, option=orjson.OPT_APPEND_NEWLINE)
             fh.write(line)
             count += 1
