@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+title: training-pipeline
+message: >-
+  If you use this software in research or product, please cite it.
+type: software
+authors:
+  - given-names: Asish
+    family-names: Kumar
+    email: officialasishkumar@gmail.com
+repository-code: https://github.com/officialasishkumar/training-pipeline
+abstract: >-
+  A repeatable pipeline that turns production LLM logs (Q&A and agentic
+  trajectories) into training-ready datasets for supervised fine-tuning
+  (LoRA) and Direct Preference Optimization (DPO), with PII redaction
+  and trajectory tagging built in.
+license: MIT

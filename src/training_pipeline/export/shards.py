@@ -15,7 +15,9 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any
+
+from typing_extensions import Self
 
 import orjson
 
