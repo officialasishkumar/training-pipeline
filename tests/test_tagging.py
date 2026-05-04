@@ -78,3 +78,123 @@ def test_stratified_split_is_deterministic(qa_trajectory: Trajectory):
 def test_stratified_split_validates_fractions():
     with pytest.raises(ValueError):
         stratified_split([], fractions=(0.5, 0.4, 0.0), seed=0)  # sums to 0.9
+
+
+def test_repair_loop_zero_for_clean_trajectory(qa_trajectory: Trajectory):
+    tags = compute_tags(qa_trajectory)
+    assert tags.repair_loop_depth == 0
+    assert tags.thrashing is False
+
+
+def test_repair_loop_one_after_single_recovery(agent_trajectory: Trajectory):
+    """One error → retry that succeeds = depth 1, no thrashing."""
+    tags = compute_tags(agent_trajectory)
+    assert tags.repair_loop_depth == 1
+    assert tags.thrashing is False
+
+
+def test_repair_loop_thrashing_after_repeated_errors():
+    """Three same-tool errors in a row should report depth=3 and thrashing=True."""
+    from datetime import datetime, timezone
+
+    from training_pipeline.schemas.events import (
+        ToolCall,
+        ToolCallEvent,
+        ToolResultEvent,
+        Trajectory,
+        UserEvent,
+    )
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def call(i: int) -> ToolCallEvent:
+        return ToolCallEvent(
+            event_id=f"tc{i}",
+            session_id="s",
+            timestamp=base.replace(second=2 * i),
+            tool_calls=[ToolCall(id=f"c{i}", name="flaky_tool")],
+        )
+
+    def result(i: int, *, error: bool) -> ToolResultEvent:
+        return ToolResultEvent(
+            event_id=f"tr{i}",
+            session_id="s",
+            timestamp=base.replace(second=2 * i + 1),
+            tool_call_id=f"c{i}",
+            name="flaky_tool",
+            content="boom" if error else '{"ok": true}',
+            is_error=error,
+        )
+
+    traj = Trajectory(
+        session_id="s",
+        events=[
+            UserEvent(event_id="u", session_id="s", timestamp=base, content="run"),
+            call(0),
+            result(0, error=True),
+            call(1),
+            result(1, error=True),
+            call(2),
+            result(2, error=True),
+            call(3),
+            result(3, error=False),
+        ],
+    )
+    tags = compute_tags(traj)
+    assert tags.repair_loop_depth == 3
+    assert tags.thrashing is True
+    assert tags.complexity_band in ("hard", "extreme")
+
+
+def test_repair_loop_resets_on_tool_switch():
+    """Switching to a different tool resets the repair streak."""
+    from datetime import datetime, timezone
+
+    from training_pipeline.schemas.events import (
+        ToolCall,
+        ToolCallEvent,
+        ToolResultEvent,
+        Trajectory,
+        UserEvent,
+    )
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    traj = Trajectory(
+        session_id="s",
+        events=[
+            UserEvent(event_id="u", session_id="s", timestamp=base, content="run"),
+            ToolCallEvent(
+                event_id="tc1",
+                session_id="s",
+                timestamp=base.replace(second=1),
+                tool_calls=[ToolCall(id="c1", name="tool_a")],
+            ),
+            ToolResultEvent(
+                event_id="tr1",
+                session_id="s",
+                timestamp=base.replace(second=2),
+                tool_call_id="c1",
+                name="tool_a",
+                content="boom",
+                is_error=True,
+            ),
+            ToolCallEvent(
+                event_id="tc2",
+                session_id="s",
+                timestamp=base.replace(second=3),
+                tool_calls=[ToolCall(id="c2", name="tool_b")],
+            ),
+            ToolResultEvent(
+                event_id="tr2",
+                session_id="s",
+                timestamp=base.replace(second=4),
+                tool_call_id="c2",
+                name="tool_b",
+                content="ok",
+                is_error=False,
+            ),
+        ],
+    )
+    tags = compute_tags(traj)
+    assert tags.repair_loop_depth == 0  # switched tools, didn't retry same one
+    assert tags.thrashing is False

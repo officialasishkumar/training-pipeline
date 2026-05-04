@@ -164,3 +164,80 @@ def test_split_integrity_flags_cross_split_leak():
     )
     report = split_integrity_report({"train": [a], "val": [b]}, threshold=0.85)
     assert report["total_leaks"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# template_dryrun
+# ---------------------------------------------------------------------------
+
+
+def test_template_dryrun_passes_on_valid_sft(agent_trajectory: Trajectory, tmp_path: Path):
+    from training_pipeline.export.sft import export_sft_jsonl
+    from training_pipeline.validate.template_dryrun import dryrun_jsonl
+
+    out = tmp_path / "sft.jsonl"
+    export_sft_jsonl([agent_trajectory], out)
+    rep = dryrun_jsonl(out, template="chatml", max_tokens=8192)
+    assert rep.passed
+    assert rep.n_records == 1
+    assert rep.max_tokens_seen > 0
+
+
+def test_template_dryrun_flags_overflow(agent_trajectory: Trajectory, tmp_path: Path):
+    from training_pipeline.export.sft import export_sft_jsonl
+    from training_pipeline.validate.template_dryrun import dryrun_jsonl
+
+    out = tmp_path / "sft.jsonl"
+    export_sft_jsonl([agent_trajectory], out)
+    rep = dryrun_jsonl(out, template="chatml", max_tokens=1)
+    assert not rep.passed
+    assert rep.n_overflow == 1
+    assert any(i.code == "CONTEXT_OVERFLOW" for i in rep.issues)
+
+
+def test_template_dryrun_flags_empty_messages(tmp_path: Path):
+    import orjson
+
+    from training_pipeline.validate.template_dryrun import dryrun_jsonl
+
+    p = tmp_path / "sft.jsonl"
+    p.write_bytes(orjson.dumps({"messages": []}, option=orjson.OPT_APPEND_NEWLINE))
+    rep = dryrun_jsonl(p)
+    assert not rep.passed
+    assert any(i.code == "EMPTY_MESSAGES" for i in rep.issues)
+
+
+def test_template_dryrun_records_unknown_template_as_render_failure(
+    qa_trajectory: Trajectory, tmp_path: Path
+):
+    """An unknown template should fail every row with a RENDER issue, not crash the run."""
+    from training_pipeline.export.sft import export_sft_jsonl
+    from training_pipeline.validate.template_dryrun import dryrun_jsonl
+
+    out = tmp_path / "sft.jsonl"
+    export_sft_jsonl([qa_trajectory], out)
+    rep = dryrun_jsonl(out, template="not_a_real_template")
+    assert not rep.passed
+    assert rep.n_failed == 1
+    assert any(i.code == "RENDER" for i in rep.issues)
+
+
+def test_template_dryrun_directory_input(qa_trajectory: Trajectory, tmp_path: Path):
+    """A directory with multiple shards should be iterated transparently."""
+    import orjson
+
+    from training_pipeline.export.sft import build_sft_record
+    from training_pipeline.validate.template_dryrun import dryrun_jsonl
+
+    out = tmp_path / "sft"
+    out.mkdir()
+    rec = build_sft_record(qa_trajectory).model_dump(mode="json", exclude_none=True)
+    (out / "sft-00000.jsonl").write_bytes(
+        orjson.dumps(rec, option=orjson.OPT_APPEND_NEWLINE)
+    )
+    (out / "sft-00001.jsonl").write_bytes(
+        orjson.dumps(rec, option=orjson.OPT_APPEND_NEWLINE)
+    )
+    rep = dryrun_jsonl(out, template="chatml")
+    assert rep.n_records == 2
+    assert rep.passed

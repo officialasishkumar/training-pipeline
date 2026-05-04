@@ -40,6 +40,16 @@ class ComplexityTags:
     has_dangling_tool_results: bool
     ambiguity_score: float
     """0.0 = clear request, 1.0 = highly ambiguous (heuristic)."""
+    repair_loop_depth: int
+    """Largest run of consecutive errors on the *same* tool name, capturing the
+    worst stretch where the agent kept retrying without success. 0 means no
+    repeats; 1 = one error followed by recovery; >=2 means a stuck loop."""
+    thrashing: bool
+    """True when the agent retried the same tool with an error >=2 times in a
+    row. Distinct from ``has_recovery`` (which can be a single retry that
+    succeeds) — thrashing signals the agent failed to find a path forward
+    quickly. Useful as a hardness signal and for filtering low-quality
+    behaviour-cloning examples."""
     complexity_band: ComplexityBand
     complexity_score: float
     """Continuous score 0..10 — input to band classification."""
@@ -55,6 +65,8 @@ class ComplexityTags:
             "has_recovery": self.has_recovery,
             "has_dangling_tool_results": self.has_dangling_tool_results,
             "ambiguity_score": round(self.ambiguity_score, 3),
+            "repair_loop_depth": self.repair_loop_depth,
+            "thrashing": self.thrashing,
             "complexity_band": self.complexity_band,
             "complexity_score": round(self.complexity_score, 3),
         }
@@ -98,6 +110,50 @@ def classify_complexity(score: float) -> ComplexityBand:
     return "extreme"
 
 
+def _repair_loop_depth(trajectory: Trajectory) -> int:
+    """Length of the longest consecutive same-tool error streak.
+
+    We walk the events in order and pair each tool call with its result via
+    ``tool_call_id``. A streak counts a *new* call to a tool whose previous
+    call (with the same name) errored. Calls to a different tool reset the
+    streak — that's the agent's choice to switch strategy.
+    """
+    last_call_name_by_id: dict[str, str] = {}
+    last_streak_tool: str | None = None
+    current_streak = 0
+    max_streak = 0
+    last_was_error: dict[str, bool] = {}
+
+    # First pass: index call name and (later) error state by call id.
+    for ev in trajectory.events:
+        if isinstance(ev, ToolCallEvent):
+            for c in ev.tool_calls:
+                last_call_name_by_id[c.id] = c.name
+        elif isinstance(ev, ToolResultEvent):
+            last_was_error[ev.tool_call_id] = ev.is_error
+
+    # Second pass: walk forward looking for retry streaks.
+    pending_error_tool: str | None = None
+    for ev in trajectory.events:
+        if isinstance(ev, ToolCallEvent):
+            for c in ev.tool_calls:
+                if pending_error_tool == c.name:
+                    if last_streak_tool == c.name:
+                        current_streak += 1
+                    else:
+                        current_streak = 1
+                        last_streak_tool = c.name
+                    max_streak = max(max_streak, current_streak)
+                else:
+                    current_streak = 0
+                    last_streak_tool = None
+                pending_error_tool = None
+        elif isinstance(ev, ToolResultEvent):
+            tool_name = last_call_name_by_id.get(ev.tool_call_id, ev.name)
+            pending_error_tool = tool_name if ev.is_error else None
+    return max_streak
+
+
 def compute_tags(trajectory: Trajectory) -> ComplexityTags:
     n_user = sum(1 for e in trajectory.events if isinstance(e, UserEvent))
     n_assist = sum(1 for e in trajectory.events if isinstance(e, AssistantEvent))
@@ -111,6 +167,8 @@ def compute_tags(trajectory: Trajectory) -> ComplexityTags:
     dangling = bool(trajectory.tags.get("dangling_tool_results"))
 
     ambiguity = _ambiguity_score(trajectory)
+    repair_depth = _repair_loop_depth(trajectory)
+    thrashing = repair_depth >= 2
 
     # Continuous score — designed so simple Q&A is < 1, multi-tool with recovery > 5.
     score = (
@@ -121,6 +179,8 @@ def compute_tags(trajectory: Trajectory) -> ComplexityTags:
         + n_errors * 0.4
         + ambiguity * 1.5
         + (1.0 if dangling else 0.0)
+        + repair_depth * 0.8
+        + (1.5 if thrashing else 0.0)
     )
 
     return ComplexityTags(
@@ -133,6 +193,8 @@ def compute_tags(trajectory: Trajectory) -> ComplexityTags:
         has_recovery=recovery,
         has_dangling_tool_results=dangling,
         ambiguity_score=ambiguity,
+        repair_loop_depth=repair_depth,
+        thrashing=thrashing,
         complexity_band=classify_complexity(score),
         complexity_score=score,
     )
