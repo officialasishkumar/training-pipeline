@@ -10,14 +10,22 @@ Built-in adapters:
 - ``anthropic``       — Anthropic Messages API logs (with tool_use blocks)
 - ``generic_chat``    — generic ``messages: [{role, content}, ...]`` logs
 - ``canonical``       — already in this pipeline's canonical schema
+
+Every adapter assigns a ``lineage_id`` derived from the raw record content. The
+id survives every later stage so an exported row can be traced back to the
+exact log line it came from — useful for audits, replay, and post-hoc
+debugging when a downstream review surfaces an issue with a specific row.
 """
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from typing import Any
+
+import orjson
 
 from training_pipeline.schemas.events import (
     AssistantEvent,
@@ -101,14 +109,49 @@ def _sid(record: dict[str, Any]) -> str:
     )
 
 
+def _lineage_id(record: dict[str, Any]) -> str:
+    """Stable id for this raw record.
+
+    Prefer an explicit ``lineage_id`` on the record (so re-ingests produce the
+    same id), then fall back to a content hash so identical inputs always
+    produce identical lineage ids — important for reproducibility.
+    """
+    explicit = record.get("lineage_id")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    try:
+        payload = orjson.dumps(record, option=orjson.OPT_SORT_KEYS)
+    except TypeError:
+        payload = repr(record).encode("utf-8")
+    return "lin_" + hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _attach_lineage(events: list[Event], lineage_id: str) -> list[Event]:
+    """Stamp ``lineage_id`` on every event in-place via model_copy."""
+    return [ev.model_copy(update={"lineage_id": lineage_id}) for ev in events]
+
+
 def _next_id(prefix: str, n: int) -> str:
     return f"{prefix}_{n:05d}"
 
 
 @register_source("canonical")
 def from_canonical(record: dict[str, Any]) -> Trajectory:
-    """Pass-through: already-canonical records just need re-validation."""
-    return Trajectory.model_validate(record)
+    """Pass-through: already-canonical records just need re-validation.
+
+    Lineage is preserved if present; otherwise a fresh id is derived from the
+    record content so re-ingesting the same JSON always yields the same id.
+    """
+    lineage = _lineage_id(record)
+    traj = Trajectory.model_validate(record)
+    if traj.lineage_id is None:
+        traj = traj.model_copy(
+            update={
+                "lineage_id": lineage,
+                "events": _attach_lineage(traj.events, lineage),
+            }
+        )
+    return traj
 
 
 @register_source("generic_chat")
@@ -141,12 +184,14 @@ def from_generic_chat(record: dict[str, Any]) -> Trajectory:
                     content=str(msg.get("content", "")),
                 )
             )
+    lineage = _lineage_id(record)
     return Trajectory(
         session_id=sid,
-        events=events,
+        events=_attach_lineage(events, lineage),
         source=record.get("source", "generic_chat"),
         domain=record.get("domain"),
         tags=dict(record.get("tags") or {}),
+        lineage_id=lineage,
     )
 
 
@@ -210,12 +255,14 @@ def from_openai_chat(record: dict[str, Any]) -> Trajectory:
                     is_error=bool(msg.get("is_error", False)),
                 )
             )
+    lineage = _lineage_id(record)
     return Trajectory(
         session_id=sid,
-        events=events,
+        events=_attach_lineage(events, lineage),
         source=record.get("source", "openai_chat"),
         domain=record.get("domain"),
         tags=dict(record.get("tags") or {}),
+        lineage_id=lineage,
     )
 
 
@@ -318,12 +365,14 @@ def from_anthropic(record: dict[str, Any]) -> Trajectory:
                         tool_calls=calls,
                     )
                 )
+    lineage = _lineage_id(record)
     return Trajectory(
         session_id=sid,
-        events=events,
+        events=_attach_lineage(events, lineage),
         source=record.get("source", "anthropic"),
         domain=record.get("domain"),
         tags=dict(record.get("tags") or {}),
+        lineage_id=lineage,
     )
 
 

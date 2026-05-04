@@ -47,6 +47,14 @@ class _BaseEvent(BaseModel):
         default_factory=lambda: datetime.now(tz=timezone.utc),
         description="UTC timestamp",
     )
+    lineage_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable id traceable back to the raw log record this event came from. "
+            "Set by the ingest stage and preserved through every later stage so an "
+            "exported row can be audited end-to-end."
+        ),
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("timestamp")
@@ -136,6 +144,14 @@ class Trajectory(BaseModel):
     domain: str | None = None
     tags: dict[str, Any] = Field(default_factory=dict)
     schema_version: str = "1.0"
+    lineage_id: str | None = Field(
+        default=None,
+        description=(
+            "Trajectory-level lineage id traceable back to the raw log record. "
+            "Mirrors lineage_id on the contained events; set by ingest, preserved "
+            "by every later stage so an exported row can be audited end-to-end."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_ordering_and_refs(self) -> Trajectory:
