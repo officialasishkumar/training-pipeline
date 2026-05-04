@@ -98,16 +98,19 @@ def _from_feedback(traj: Trajectory, *, system_prompt: str | None) -> Iterator[D
         prompt = base_msgs[:end]
         chosen = [SFTMessage(role="assistant", content=str(fp.get("chosen") or ""))]
         rejected = [SFTMessage(role="assistant", content=str(fp.get("rejected") or ""))]
+        meta: dict[str, Any] = {
+            "source": "feedback",
+            "weight": fp.get("weight", 1.0),
+            "session_id": traj.session_id,
+            "prompt_event_id": eid,
+        }
+        if traj.lineage_id is not None:
+            meta["lineage_id"] = traj.lineage_id
         yield build_dpo_record(
             prompt=prompt,
             chosen=chosen,
             rejected=rejected,
-            metadata={
-                "source": "feedback",
-                "weight": fp.get("weight", 1.0),
-                "session_id": traj.session_id,
-                "prompt_event_id": eid,
-            },
+            metadata=meta,
         )
 
 
@@ -166,16 +169,19 @@ def _from_failure_recovery(traj: Trajectory, *, system_prompt: str | None) -> It
                 content="I'm sorry, I'm unable to complete the request.",
             )
         ]
+        meta: dict[str, Any] = {
+            "source": "failure_recovery",
+            "session_id": traj.session_id,
+            "failure_event_id": ev.event_id,
+            "recovery_event_id": next_assistant.event_id,
+        }
+        if traj.lineage_id is not None:
+            meta["lineage_id"] = traj.lineage_id
         yield build_dpo_record(
             prompt=prompt,
             chosen=chosen,
             rejected=rejected,
-            metadata={
-                "source": "failure_recovery",
-                "session_id": traj.session_id,
-                "failure_event_id": ev.event_id,
-                "recovery_event_id": next_assistant.event_id,
-            },
+            metadata=meta,
         )
 
 
@@ -213,11 +219,17 @@ def export_dpo_jsonl(
             for traj in trajectories:
                 base_msgs = trajectory_to_messages(traj, system_prompt=system_prompt)
                 for chosen, rejected in synthetic_generator(traj, base_msgs):
+                    meta: dict[str, Any] = {
+                        "source": "synthetic",
+                        "session_id": traj.session_id,
+                    }
+                    if traj.lineage_id is not None:
+                        meta["lineage_id"] = traj.lineage_id
                     yield build_dpo_record(
                         prompt=base_msgs,
                         chosen=chosen,
                         rejected=rejected,
-                        metadata={"source": "synthetic", "session_id": traj.session_id},
+                        metadata=meta,
                     )
 
         rows = _gen()

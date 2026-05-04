@@ -55,6 +55,53 @@ def test_export_sft_jsonl_file_count(qa_trajectory: Trajectory, tmp_path: Path):
     assert "messages" in payload
 
 
+def test_sft_record_has_loss_weights_aligned_with_messages(agent_trajectory: Trajectory):
+    """Default policy: assistant turns weighted 1.0; user/tool weighted 0.0."""
+    rec = build_sft_record(agent_trajectory)
+    weights = rec.metadata["loss_weights"]
+    assert len(weights) == len(rec.messages)
+    for m, w in zip(rec.messages, weights, strict=True):
+        if m.role == "assistant":
+            assert w == 1.0
+        else:
+            assert w == 0.0
+
+
+def test_sft_record_assistant_text_only_policy(agent_trajectory: Trajectory):
+    """assistant_text_only zeros out tool-call envelopes."""
+    rec = build_sft_record(agent_trajectory, loss_policy="assistant_text_only")
+    weights = rec.metadata["loss_weights"]
+    for m, w in zip(rec.messages, weights, strict=True):
+        if m.role == "assistant" and m.tool_calls:
+            assert w == 0.0
+        elif m.role == "assistant":
+            assert w == 1.0
+        else:
+            assert w == 0.0
+
+
+def test_sft_record_loss_policy_none_omits_weights(agent_trajectory: Trajectory):
+    rec = build_sft_record(agent_trajectory, loss_policy=None)
+    assert "loss_weights" not in rec.metadata
+    assert "loss_policy" not in rec.metadata
+
+
+def test_sft_metadata_carries_lineage_id():
+    """lineage_id from the trajectory should be preserved on the SFT record."""
+    from training_pipeline.ingest.sources import from_canonical
+
+    record = {
+        "session_id": "s",
+        "events": [
+            {"kind": "user", "event_id": "u1", "session_id": "s", "content": "hi"},
+            {"kind": "assistant", "event_id": "a1", "session_id": "s", "content": "ok"},
+        ],
+    }
+    traj = from_canonical(record)
+    rec = build_sft_record(traj)
+    assert rec.metadata["lineage_id"] == traj.lineage_id
+
+
 def test_template_chatml_renders(qa_trajectory: Trajectory):
     msgs = trajectory_to_messages(qa_trajectory)
     rendered = apply_template(msgs, template="chatml")
@@ -72,6 +119,40 @@ def test_every_known_template_renders(template_name, qa_trajectory: Trajectory):
     msgs = trajectory_to_messages(qa_trajectory)
     rendered = apply_template(msgs, template=template_name)
     assert isinstance(rendered, str) and rendered
+
+
+@pytest.mark.parametrize("template_name", list(KNOWN_TEMPLATES))
+def test_every_template_renders_tool_calls(template_name, agent_trajectory: Trajectory):
+    """Every shipped template must round-trip a multi-tool trajectory."""
+    msgs = trajectory_to_messages(agent_trajectory)
+    rendered = apply_template(msgs, template=template_name)
+    assert isinstance(rendered, str) and rendered
+    # The rendered output should mention the tool name once per call.
+    assert rendered.count("mandi_price") >= 2
+
+
+def test_qwen_template_uses_tool_call_envelope(agent_trajectory: Trajectory):
+    msgs = trajectory_to_messages(agent_trajectory)
+    rendered = apply_template(msgs, template="qwen")
+    assert "<tool_call>" in rendered
+    assert "<tool_response>" in rendered
+
+
+def test_gemma_template_uses_start_of_turn(agent_trajectory: Trajectory):
+    msgs = trajectory_to_messages(agent_trajectory)
+    rendered = apply_template(msgs, template="gemma")
+    assert "<start_of_turn>" in rendered
+    assert "<end_of_turn>" in rendered
+    # Assistant role becomes "model" in Gemma.
+    assert "<start_of_turn>model" in rendered
+
+
+def test_mistral_template_uses_inst_framing(agent_trajectory: Trajectory):
+    msgs = trajectory_to_messages(agent_trajectory)
+    rendered = apply_template(msgs, template="mistral")
+    assert "[INST]" in rendered
+    assert "[TOOL_CALLS]" in rendered
+    assert "[TOOL_RESULTS]" in rendered
 
 
 def test_dpo_feedback_strategy(tmp_path: Path):

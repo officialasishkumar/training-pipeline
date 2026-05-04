@@ -75,10 +75,85 @@ TOOL_CALL({{ tc.name }}, {{ tc.arguments | tojson }}){%- endfor -%}
 {%- if add_generation_prompt -%}ASSISTANT:{%- endif -%}"""
 
 
+# Qwen2 / Qwen2.5 use ChatML-style tokens with a separate ``<tool_call>`` JSON
+# envelope and ``<tool_response>`` for results. Most Qwen tokenizers ship a
+# chat_template embedded — this string mirrors that shape so previews match.
+QWEN = """{%- for m in messages -%}
+<|im_start|>{{ m.role }}
+{%- if m.role == 'assistant' and m.tool_calls -%}
+{%- if m.content %}
+{{ m.content }}{% endif %}
+{%- for tc in m.tool_calls %}
+<tool_call>
+{"name": "{{ tc.name }}", "arguments": {{ tc.arguments | tojson }}}
+</tool_call>
+{%- endfor %}
+{%- elif m.role == 'tool' %}
+<tool_response>
+{{ m.content }}
+</tool_response>
+{%- else %}
+{{ m.content or '' }}
+{%- endif %}<|im_end|>
+{% endfor -%}
+{%- if add_generation_prompt -%}<|im_start|>assistant
+{%- endif -%}"""
+
+
+# Gemma instruct prepends a BOS-like ``<start_of_turn>`` per role and ends with
+# ``<end_of_turn>``. Gemma has no first-class tool-call slot, so we serialise
+# tool calls/results into the message body — this matches what the tokenizer's
+# default chat_template does for tool-using fine-tunes.
+GEMMA = """{%- for m in messages -%}
+<start_of_turn>{{ 'model' if m.role == 'assistant' else m.role }}
+{%- if m.role == 'assistant' and m.tool_calls -%}
+{%- if m.content %}
+{{ m.content }}{% endif %}
+{%- for tc in m.tool_calls %}
+```tool_code
+{"name": "{{ tc.name }}", "args": {{ tc.arguments | tojson }}}
+```
+{%- endfor %}
+{%- elif m.role == 'tool' %}
+```tool_result
+{{ m.content }}
+```
+{%- else %}
+{{ m.content or '' }}
+{%- endif %}<end_of_turn>
+{% endfor -%}
+{%- if add_generation_prompt -%}<start_of_turn>model
+{%- endif -%}"""
+
+
+# Mistral / Mixtral instruct uses ``[INST] ... [/INST]`` framing. Tool calling
+# follows Mistral's ``[TOOL_CALLS]`` / ``[TOOL_RESULTS]`` token convention; tool
+# arguments are emitted as a JSON list to match transformers' Mistral template.
+MISTRAL = """{%- for m in messages -%}
+{%- if m.role == 'system' -%}
+[INST] {{ m.content }} [/INST]
+{%- elif m.role == 'user' -%}
+[INST] {{ m.content }} [/INST]
+{%- elif m.role == 'assistant' -%}
+{%- if m.tool_calls -%}
+{%- if m.content %} {{ m.content }}{% endif %}
+[TOOL_CALLS] [{%- for tc in m.tool_calls %}{"name": "{{ tc.name }}", "arguments": {{ tc.arguments | tojson }}}{%- if not loop.last -%}, {%- endif -%}{%- endfor %}]</s>
+{%- else -%}
+ {{ m.content or '' }}</s>
+{%- endif %}
+{%- elif m.role == 'tool' -%}
+[TOOL_RESULTS] {"content": {{ m.content | tojson }}, "call_id": "{{ m.tool_call_id }}"} [/TOOL_RESULTS]
+{%- endif %}
+{% endfor -%}"""
+
+
 KNOWN_TEMPLATES: dict[str, str] = {
     "chatml": CHATML,
     "llama3": LLAMA3,
     "plain": PLAIN,
+    "qwen": QWEN,
+    "gemma": GEMMA,
+    "mistral": MISTRAL,
 }
 
 
