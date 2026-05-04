@@ -23,6 +23,7 @@ ErrorEvent      # role=error, kind=error           (system or tool error attache
 | `event_id`   | `str`               | Stable id within a session.                       |
 | `session_id` | `str`               | Session this event belongs to.                    |
 | `timestamp`  | `datetime`          | UTC; tz-naive inputs get tagged UTC on ingest.    |
+| `lineage_id` | `str \| None`       | Stable id traceable back to the raw log record. Set by ingest from a content hash; preserved through every later stage. |
 | `metadata`   | `dict[str, Any]`    | Free-form per-event metadata.                     |
 
 ### Event-specific fields
@@ -63,6 +64,7 @@ class Trajectory(BaseModel):
     domain: str | None
     tags: dict[str, Any]
     schema_version: str = "1.0"
+    lineage_id: str | None
 ```
 
 A trajectory enforces:
@@ -85,6 +87,8 @@ Tags are a free-form dict on `Trajectory`. The pipeline writes a few well-known 
 | ---------------------------- | ------------- | ------------------------------------------------ |
 | `pii_redacted`               | `pii.redactor`| `bool`                                            |
 | `pii_counts`                 | `pii.redactor`| `dict[str, int]` (category → count)               |
+| `pii_leak_count`             | `pii.redactor`| `int` — set only if the leakage gate found PII still in the output. |
+| `pii_leak_categories`        | `pii.redactor`| `list[str]` of categories that survived redaction. |
 | `dangling_tool_results`      | `Trajectory`  | `list[str]` of event_ids                          |
 | `complexity`                 | `tagging`     | dict (see below)                                  |
 | `feedback_pairs`             | *external*    | list of `{prompt_event_id, chosen, rejected, ...}` for DPO |
@@ -102,6 +106,8 @@ Tags are a free-form dict on `Trajectory`. The pipeline writes a few well-known 
   "has_recovery": true,
   "has_dangling_tool_results": false,
   "ambiguity_score": 0.0,
+  "repair_loop_depth": 1,        // longest same-tool error streak (0 = clean)
+  "thrashing": false,            // true when depth >= 2
   "complexity_band": "medium",
   "complexity_score": 3.7
 }
@@ -127,7 +133,10 @@ Tags are a free-form dict on `Trajectory`. The pipeline writes a few well-known 
   ],
   "metadata": {
     "session_id": "...", "domain": "...", "complexity": { "..." },
-    "schema_version": "1.0"
+    "schema_version": "1.0",
+    "lineage_id": "lin_<sha256-prefix>",   // traces back to the raw log record
+    "loss_weights": [0.0, 0.0, 1.0, 0.0, 1.0],  // per-message; aligned with messages
+    "loss_policy": "assistant_only"
   }
 }
 ```

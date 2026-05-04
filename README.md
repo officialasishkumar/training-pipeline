@@ -17,18 +17,21 @@ Production logs contain three things you need at once: **signal** (the model's a
 
 `training-pipeline` keeps that structure end-to-end:
 
-- **Ingest** heterogeneous log formats into a single canonical event schema.
-- **Redact PII** with rule-based detectors (regex + optional Presidio) and consistent placeholders, keeping an audit trail.
-- **Tag trajectories** with step counts, tool diversity, recovery flags, and ambiguity heuristics.
-- **Validate** schema, tool-call/observation consistency, and split integrity (no near-duplicate leakage).
-- **Export** SFT JSONL aligned to a chosen chat template and DPO JSONL with prompt/chosen/rejected.
+- **Ingest** heterogeneous log formats into a single canonical event schema, stamping every event with a content-derived `lineage_id` so an exported row can be traced back to the raw log line.
+- **Redact PII** with rule-based detectors (regex + optional Presidio) and consistent placeholders, keeping an audit trail. A second-pass leakage gate re-runs the detectors on the redacted output and quarantines anything that survives.
+- **Tag trajectories** with step counts, tool diversity, recovery flags, repair-loop depth, thrashing, and ambiguity heuristics.
+- **Validate** schema, tool-call/observation consistency, and split integrity (no near-duplicate leakage). A trainer-tokenizer dry-run feeds every exported row through `apply_chat_template` to catch context overflow and template errors before training starts.
+- **Export** SFT JSONL aligned to a chosen chat template (ChatML, Llama-3, Qwen, Gemma, Mistral, plain) — with per-message `loss_weights` so trainers can zero loss on user/tool tokens — and DPO JSONL with prompt/chosen/rejected.
+- **Reproduce** any run end-to-end via `tp run --manifest <path>`: the manifest pins the config hash, code version, and SHA-256 of every output file. `tp manifest verify` flags silent drift between publication and consumption.
 
 ## Pipeline at a glance
 
 ```
 raw logs ──▶ ingest ──▶ normalize ──▶ redact ──▶ tag ──▶ validate ──▶ export ──▶ SFT/DPO JSONL
-                                          │                              │
-                                          └──▶ audit sample              └──▶ shard metadata
+              │                          │ │                    │           │           │
+              └▶ lineage_id stamped     │ └▶ leakage gate       │           │           └▶ shard metadata + manifest
+                                        └▶ audit sample          └▶ template dry-run    │
+                                                                                        └▶ loss_weights metadata
 ```
 
 Every stage is a CLI subcommand — wire them into a Makefile, Dagster job, or run them by hand.
@@ -55,11 +58,12 @@ pip install -e ".[dev]"
 # 1. ingest logs into the canonical schema
 tp ingest --input examples/sample_logs/ --output build/canonical.jsonl
 
-# 2. redact PII (writes audit sample for review)
+# 2. redact PII with the second-pass leakage gate
 tp redact --input build/canonical.jsonl --output build/redacted.jsonl \
-          --audit build/audit_sample.jsonl --audit-rate 0.05
+          --audit build/audit_sample.jsonl --audit-rate 0.05 \
+          --quarantine build/quarantine.jsonl --fail-on-leak
 
-# 3. tag complexity / recovery
+# 3. tag complexity / recovery / repair-loop depth
 tp tag --input build/redacted.jsonl --output build/tagged.jsonl
 
 # 4. validate schemas + tool consistency
@@ -67,15 +71,21 @@ tp validate --input build/tagged.jsonl --tool-registry configs/tools.yaml
 
 # 5. export SFT and DPO datasets
 tp export sft --input build/tagged.jsonl --output build/sft/ \
-              --template chatml --shard-size 5000
+              --template chatml --shard-size 5000 --loss-policy assistant_only
 tp export dpo --input build/tagged.jsonl --output build/dpo/ \
-              --pair-strategy feedback
+              --strategy feedback
+
+# 6. trainer-tokenizer dry-run on the SFT output
+tp validate-template --input build/sft --template chatml --max-tokens 8192
+# or against the actual model's tokenizer:
+tp validate-template --input build/sft --tokenizer hf:meta-llama/Llama-3.1-8B-Instruct --template hf
 ```
 
-Or run the full pipeline with a config:
+Or run the full pipeline with a config and a reproducibility manifest:
 
 ```bash
-tp run --config configs/example.yaml
+tp run --config configs/example.yaml --manifest build/manifest.json
+tp manifest verify build/manifest.json --base-dir .
 ```
 
 ## Output formats

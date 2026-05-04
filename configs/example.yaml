@@ -17,6 +17,10 @@ pii:
   audit_rate: 0.10
   audit_seed: 0
   audit_cap: 100
+  # Defense-in-depth: rows that still match a PII rule after redaction are
+  # routed here instead of shipping. Set fail_on_leak: true to abort the run.
+  quarantine: build/redaction_quarantine.jsonl
+  fail_on_leak: false
 
 tag:
   input: build/redacted.jsonl
@@ -40,10 +44,15 @@ split:
 sft:
   input: build/tagged.jsonl
   output_dir: build/sft
+  # template: one of chatml, llama3, qwen, gemma, mistral, plain
   template: chatml
   system_prompt: "You are an OpenAgriNet assistant for Indian farmers."
   shard_size: 1000
   compress: false
+  # loss_policy: 'assistant_only' (default) trains on assistant turns
+  # including tool calls; 'assistant_text_only' skips the tool envelopes;
+  # 'none' suppresses the metadata field entirely (backward-compat).
+  loss_policy: assistant_only
 
 dpo:
   input: build/tagged.jsonl

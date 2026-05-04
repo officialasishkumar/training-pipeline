@@ -5,15 +5,22 @@ the same code paths are tested by ``pytest`` and exercised in production.
 
 ::
 
-    tp ingest    --input PATH --output PATH [--source NAME]
-    tp redact    --input PATH --output PATH [--rules FILE] [--audit FILE --audit-rate 0.05]
-    tp tag       --input PATH --output PATH
-    tp validate  --input PATH [--tool-registry FILE] [--issues FILE]
-    tp split     --input PATH --output-dir DIR [--fractions 0.8 0.1 0.1]
-    tp export sft --input PATH --output-dir DIR [--template chatml] [--shard-size 5000]
-    tp export dpo --input PATH --output-dir DIR [--strategy feedback]
-    tp run       --config FILE   # full pipeline
-    tp eval      --student FILE --teacher FILE [--report FILE]
+    tp ingest             --input PATH --output PATH [--source NAME]
+    tp redact             --input PATH --output PATH [--rules FILE] [--audit FILE]
+                          [--quarantine PATH] [--fail-on-leak]
+    tp tag                --input PATH --output PATH
+    tp validate           --input PATH [--tool-registry FILE] [--issues FILE]
+    tp validate-template  --input PATH [--template chatml] [--tokenizer hf:<id>]
+                          [--max-tokens 8192] [--report FILE]
+    tp split              --input PATH --output-dir DIR [--fractions 0.8 0.1 0.1]
+    tp export sft         --input PATH --output-dir DIR [--template chatml]
+                          [--shard-size 5000] [--loss-policy assistant_only]
+    tp export dpo         --input PATH --output-dir DIR [--strategy feedback]
+    tp run                --config FILE [--manifest PATH]   # full pipeline
+    tp manifest show      PATH
+    tp manifest verify    PATH [--base-dir DIR]
+    tp hash-config        --config FILE
+    tp eval               --student FILE --teacher FILE [--report FILE]
     tp version
 """
 
@@ -35,6 +42,18 @@ from training_pipeline.export.sft import iter_sft_records
 from training_pipeline.export.shards import ShardWriter, write_dataset_card
 from training_pipeline.ingest.normalizer import NormalizationError, normalize_records
 from training_pipeline.ingest.parsers import iter_records, write_jsonl
+from training_pipeline.manifest import (
+    RunManifest,
+    StageEntry,
+    discover_files,
+    file_entries,
+    hash_obj,
+    load_manifest,
+    make_run_id,
+    now_utc,
+    verify_manifest,
+    write_manifest,
+)
 from training_pipeline.pii.audit import AuditSampler
 from training_pipeline.pii.redactor import Redactor
 from training_pipeline.pii.rules import BUILTIN_RULES, load_rules
@@ -46,6 +65,7 @@ from training_pipeline.validate.consistency import (
     validate_consistency,
 )
 from training_pipeline.validate.splits import split_integrity_report
+from training_pipeline.validate.template_dryrun import dryrun_jsonl
 
 app = typer.Typer(
     name="tp",
@@ -145,16 +165,41 @@ def redact(
     audit_rate: Annotated[float, typer.Option("--audit-rate")] = 0.05,
     audit_seed: Annotated[int, typer.Option("--audit-seed")] = 0,
     audit_cap: Annotated[int, typer.Option("--audit-cap")] = 1000,
+    quarantine: Annotated[
+        Path | None,
+        typer.Option(
+            "--quarantine",
+            help=(
+                "Where to write trajectories with surviving PII after redaction. "
+                "When set, leaked rows are routed here and not to --output."
+            ),
+        ),
+    ] = None,
+    fail_on_leak: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-leak",
+            help="Exit non-zero if any trajectory has surviving PII after redaction.",
+        ),
+    ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Detect PII and write redacted Trajectory JSONL with placeholders."""
+    """Detect PII and write redacted Trajectory JSONL with placeholders.
+
+    A defense-in-depth pass re-runs the detectors on the redacted output. Rows
+    that still match a rule are tagged ``pii_leak_count`` and — when
+    ``--quarantine`` is set — written there instead of the main output.
+    """
     _setup_logging(verbose)
     rule_set = load_rules(rules) if rules else BUILTIN_RULES
     redactor = Redactor(rules=rule_set)
     sampler = AuditSampler(rate=audit_rate, seed=audit_seed, cap=audit_cap)
     totals: dict[str, int] = {}
+    n_leaks = 0
+    leak_records: list[dict[str, Any]] = []
 
     def _gen() -> Iterator[Trajectory]:
+        nonlocal n_leaks
         for traj in _iter_trajectories(input):
             res = redactor.redact_trajectory(traj, record_for_audit=bool(audit))
             for k, v in res.report.items():
@@ -166,11 +211,38 @@ def redact(
                     "events": res.sample,
                 }
                 sampler.consider(rec, key=traj.session_id)
+            if res.has_leaks:
+                n_leaks += 1
+                leak_records.append(
+                    {
+                        "session_id": traj.session_id,
+                        "lineage_id": traj.lineage_id,
+                        "leaks": [
+                            {
+                                "event_id": lk.event_id,
+                                "rule": lk.rule,
+                                "category": lk.category,
+                                "field": lk.field,
+                            }
+                            for lk in res.leaks
+                        ],
+                    }
+                )
+                if quarantine:
+                    # Skip leaked rows from the main stream.
+                    continue
             yield res.trajectory
 
     write_jsonl(output, _gen())
     if audit:
         write_jsonl(audit, sampler.consume())
+    if quarantine and leak_records:
+        import orjson
+
+        quarantine.parent.mkdir(parents=True, exist_ok=True)
+        with quarantine.open("wb") as fh:
+            for r in leak_records:
+                fh.write(orjson.dumps(r, option=orjson.OPT_APPEND_NEWLINE))
 
     table = Table(title="PII redaction summary")
     table.add_column("Category")
@@ -179,6 +251,15 @@ def redact(
         table.add_row(k, str(v))
     console.print(table)
     console.print(f"[green]redact:[/green] → {output}")
+    if n_leaks:
+        msg = f"[red]leakage:[/red] {n_leaks} trajectories had surviving PII"
+        if quarantine:
+            msg += f" → {quarantine}"
+        console.print(msg)
+        if fail_on_leak:
+            raise typer.Exit(code=2)
+    else:
+        console.print("[green]leakage:[/green] none")
 
 
 @app.command()
@@ -356,19 +437,34 @@ def export_sft_cmd(
     system_prompt: Annotated[str | None, typer.Option("--system-prompt")] = None,
     shard_size: Annotated[int, typer.Option("--shard-size")] = 5000,
     compress: Annotated[bool, typer.Option("--compress")] = False,
+    loss_policy: Annotated[
+        str,
+        typer.Option(
+            "--loss-policy",
+            help=(
+                "Per-message loss weighting policy: 'assistant_only' (default), "
+                "'assistant_text_only', or 'none' to skip emission."
+            ),
+        ),
+    ] = "assistant_only",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Build SFT JSONL shards (chat-template aligned) with a dataset card."""
     _setup_logging(verbose)
     output_dir.mkdir(parents=True, exist_ok=True)
     n = 0
+    policy: str | None = None if loss_policy == "none" else loss_policy
     with ShardWriter(
         output_dir,
         shard_size=shard_size,
         prefix="sft",
         compress=compress,
     ) as writer:
-        for record in iter_sft_records(_iter_trajectories(input), system_prompt=system_prompt):
+        for record in iter_sft_records(
+            _iter_trajectories(input),
+            system_prompt=system_prompt,
+            loss_policy=policy,
+        ):
             writer.write(record)
             n += 1
         fingerprint = writer.fingerprint()
@@ -379,6 +475,7 @@ def export_sft_cmd(
         fingerprint=fingerprint,
         fields=["messages", "metadata"],
         chat_template=template,
+        extra={"loss_policy": loss_policy},
     )
     console.print(f"[green]export sft:[/green] {n} records → {output_dir}")
 
@@ -437,13 +534,56 @@ def export_dpo_cmd(
 @app.command()
 def run(
     config: Annotated[Path, typer.Option("--config", "-c")],
+    manifest_out: Annotated[
+        Path | None,
+        typer.Option(
+            "--manifest",
+            help=(
+                "Write a run manifest (config hash, code version, per-stage file "
+                "hashes) to this path for reproducibility and audit."
+            ),
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Run the full pipeline from a YAML config."""
+    """Run the full pipeline from a YAML config.
+
+    With ``--manifest`` set, every stage's outputs are hashed and recorded
+    alongside the config snapshot. ``tp manifest verify`` later confirms the
+    on-disk build matches the manifest, catching silent drift.
+    """
     _setup_logging(verbose)
     cfg = load_pipeline_config(config)
+    cfg_dict = cfg.model_dump(mode="json")
+    cfg_hash = hash_obj(cfg_dict)
+    started = now_utc()
+    # Anchor every manifest path to the cwd so a single --base-dir resolves all
+    # of them at verify time. Without this, ``discover_files`` and
+    # ``file_entries`` use different bases and verify can't find anything.
+    manifest_anchor = Path.cwd()
+    manifest = RunManifest(
+        run_id=make_run_id(cfg_hash, started),
+        pipeline_version=__version__,
+        created_at=started,
+        config_hash=cfg_hash,
+        config_snapshot=cfg_dict,
+    )
+
+    def _stage(name: str, started_at: Any, files: list[Any], counters: dict[str, int] | None = None) -> None:
+        if manifest_out:
+            manifest.stages.append(
+                StageEntry(
+                    name=name,
+                    started_at=started_at,
+                    finished_at=now_utc(),
+                    files=files,
+                    counters=counters or {},
+                )
+            )
+
     console.rule(f"[bold]{cfg.name}")
     console.print("[1/6] ingest")
+    s_started = now_utc()
     ingest(
         input=Path(cfg.ingest.input),
         output=Path(cfg.ingest.output),
@@ -451,7 +591,16 @@ def run(
         quarantine=Path(cfg.ingest.quarantine) if cfg.ingest.quarantine else None,
         verbose=verbose,
     )
+    if manifest_out:
+        files = file_entries([cfg.ingest.output], role="output", base_dir=manifest_anchor)
+        if cfg.ingest.quarantine and Path(cfg.ingest.quarantine).exists():
+            files.extend(
+                file_entries([cfg.ingest.quarantine], role="quarantine", base_dir=manifest_anchor)
+            )
+        _stage("ingest", s_started, files)
+
     console.print("[2/6] redact")
+    s_started = now_utc()
     redact(
         input=Path(cfg.pii.input),
         output=Path(cfg.pii.output),
@@ -460,15 +609,38 @@ def run(
         audit_rate=cfg.pii.audit_rate,
         audit_seed=cfg.pii.audit_seed,
         audit_cap=cfg.pii.audit_cap,
+        quarantine=Path(cfg.pii.quarantine) if cfg.pii.quarantine else None,
+        fail_on_leak=cfg.pii.fail_on_leak,
         verbose=verbose,
     )
+    if manifest_out:
+        files = file_entries([cfg.pii.output], role="output", base_dir=manifest_anchor)
+        if cfg.pii.audit_output and Path(cfg.pii.audit_output).exists():
+            files.extend(
+                file_entries([cfg.pii.audit_output], role="audit", base_dir=manifest_anchor)
+            )
+        if cfg.pii.quarantine and Path(cfg.pii.quarantine).exists():
+            files.extend(
+                file_entries([cfg.pii.quarantine], role="quarantine", base_dir=manifest_anchor)
+            )
+        _stage("redact", s_started, files)
+
     console.print("[3/6] tag")
+    s_started = now_utc()
     tag(
         input=Path(cfg.tag.input),
         output=Path(cfg.tag.output),
         verbose=verbose,
     )
+    if manifest_out:
+        _stage(
+            "tag",
+            s_started,
+            file_entries([cfg.tag.output], role="output", base_dir=manifest_anchor),
+        )
+
     console.print("[4/6] validate")
+    s_started = now_utc()
     validate(
         input=Path(cfg.validation.input),
         tool_registry=Path(cfg.validation.tool_registry) if cfg.validation.tool_registry else None,
@@ -478,7 +650,22 @@ def run(
         else None,
         verbose=verbose,
     )
+    if manifest_out:
+        files = []
+        if cfg.validation.output and Path(cfg.validation.output).exists():
+            files.extend(
+                file_entries([cfg.validation.output], role="output", base_dir=manifest_anchor)
+            )
+        if cfg.validation.issues_output and Path(cfg.validation.issues_output).exists():
+            files.extend(
+                file_entries(
+                    [cfg.validation.issues_output], role="issues", base_dir=manifest_anchor
+                )
+            )
+        _stage("validate", s_started, files)
+
     console.print("[5/6] export sft")
+    s_started = now_utc()
     export_sft_cmd(
         input=Path(cfg.sft.input),
         output_dir=Path(cfg.sft.output_dir),
@@ -486,9 +673,18 @@ def run(
         system_prompt=cfg.sft.system_prompt,
         shard_size=cfg.sft.shard_size,
         compress=cfg.sft.compress,
+        loss_policy=cfg.sft.loss_policy,
         verbose=verbose,
     )
+    if manifest_out:
+        _stage(
+            "export_sft",
+            s_started,
+            discover_files(cfg.sft.output_dir, role="shard", base_dir=manifest_anchor),
+        )
+
     console.print("[6/6] export dpo")
+    s_started = now_utc()
     export_dpo_cmd(
         input=Path(cfg.dpo.input),
         output_dir=Path(cfg.dpo.output_dir),
@@ -498,7 +694,154 @@ def run(
         compress=cfg.dpo.compress,
         verbose=verbose,
     )
+    if manifest_out:
+        _stage(
+            "export_dpo",
+            s_started,
+            discover_files(cfg.dpo.output_dir, role="shard", base_dir=manifest_anchor),
+        )
+
+    if manifest_out:
+        write_manifest(manifest_out, manifest)
+        console.print(f"[green]manifest:[/green] {manifest.run_id} → {manifest_out}")
+
     console.rule("[green]done")
+
+
+manifest_app = typer.Typer(name="manifest", help="Inspect and verify run manifests.")
+app.add_typer(manifest_app, name="manifest")
+
+
+@manifest_app.command("verify")
+def manifest_verify_cmd(
+    manifest: Annotated[Path, typer.Argument(help="Path to manifest.json")],
+    base_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--base-dir",
+            help="Directory whose contents the manifest's relative paths resolve against. "
+            "Defaults to the manifest's parent directory.",
+        ),
+    ] = None,
+) -> None:
+    """Confirm every file in the manifest still hashes to the recorded value.
+
+    Use this before publishing or training: a single edited shard or a partial
+    re-export will surface here as a hash mismatch.
+    """
+    m = load_manifest(manifest)
+    base = base_dir or manifest.parent
+    errors = verify_manifest(m, base_dir=base)
+    if errors:
+        for e in errors:
+            console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(code=2)
+    console.print(
+        f"[green]ok:[/green] {sum(len(s.files) for s in m.stages)} files match {m.run_id}"
+    )
+
+
+@manifest_app.command("show")
+def manifest_show_cmd(
+    manifest: Annotated[Path, typer.Argument(help="Path to manifest.json")],
+) -> None:
+    """Print a summary of a manifest: run id, code version, file count per stage."""
+    m = load_manifest(manifest)
+    table = Table(title=f"Manifest {m.run_id}")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("pipeline_version", m.pipeline_version)
+    table.add_row("created_at", m.created_at.isoformat())
+    table.add_row("config_hash", m.config_hash or "—")
+    table.add_row("stages", ", ".join(s.name for s in m.stages))
+    table.add_row("files", str(sum(len(s.files) for s in m.stages)))
+    console.print(table)
+
+
+@app.command("hash-config")
+def hash_config_cmd(
+    config: Annotated[Path, typer.Option("--config", "-c")],
+) -> None:
+    """Print the deterministic hash of a pipeline config (used for run ids)."""
+    cfg = load_pipeline_config(config)
+    console.print(hash_obj(cfg.model_dump(mode="json")))
+
+
+@app.command("validate-template")
+def validate_template_cmd(
+    input: Annotated[
+        Path,
+        typer.Option(
+            "--input",
+            "-i",
+            help="SFT JSONL file or directory of shards.",
+        ),
+    ],
+    template: Annotated[
+        str,
+        typer.Option(
+            "--template",
+            help="Chat template name (chatml, llama3, qwen, gemma, mistral, plain) or 'hf'.",
+        ),
+    ] = "chatml",
+    tokenizer: Annotated[
+        str | None,
+        typer.Option(
+            "--tokenizer",
+            help=(
+                "Tokenizer spec. None or 'whitespace' uses a cheap fallback. "
+                "Use 'hf:<model_id>' for an HF AutoTokenizer."
+            ),
+        ),
+    ] = None,
+    max_tokens: Annotated[
+        int,
+        typer.Option("--max-tokens", help="Max context window the trainer will allow."),
+    ] = 8192,
+    report: Annotated[
+        Path | None,
+        typer.Option("--report", help="Write the full report JSON here."),
+    ] = None,
+    fail_fast: Annotated[bool, typer.Option("--fail-fast")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Run the SFT export through render+tokenize and report bad rows.
+
+    This catches bugs that schema validation can't: empty renders, template
+    errors on tool-call messages, and trajectories that overflow the model's
+    context window. Use ``--tokenizer hf:<model_id>`` for the trainer's exact
+    tokenizer; without it, a whitespace fallback gives a conservative estimate.
+    """
+    _setup_logging(verbose)
+    rep = dryrun_jsonl(
+        input,
+        template=template,
+        tokenizer=tokenizer,
+        max_tokens=max_tokens,
+        fail_fast=fail_fast,
+    )
+    if report:
+        import orjson
+
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_bytes(orjson.dumps(rep.as_dict(), option=orjson.OPT_INDENT_2))
+
+    table = Table(title=f"Template dry-run ({rep.template} / {rep.tokenizer})")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("records", str(rep.n_records))
+    table.add_row("failed", str(rep.n_failed))
+    table.add_row("over-budget", str(rep.n_overflow))
+    table.add_row("max tokens seen", str(rep.max_tokens_seen))
+    table.add_row("budget", str(max_tokens))
+    console.print(table)
+    if not rep.passed:
+        console.print(
+            f"[red]validate-template:[/red] {rep.n_failed} render failures, "
+            f"{rep.n_overflow} over budget"
+        )
+        raise typer.Exit(code=2)
+    console.print("[green]validate-template:[/green] all rows render and fit")
 
 
 @app.command()

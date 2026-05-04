@@ -4,42 +4,48 @@ Mapping each acceptance criterion in [OpenAgriNet/training_setup_logs#1](https:/
 
 ## ✅ No training artifact ships without passing the configured PII pipeline and a documented audit sample
 
-**Implementation:** `tp redact` is a required stage in `tp run`. The CLI writes both the redacted JSONL and (when `--audit` is set) an audit sample. `pii_redacted: true` is added to every trajectory's `tags`.
+**Implementation:** `tp redact` is a required stage in `tp run`. The CLI writes both the redacted JSONL and (when `--audit` is set) an audit sample. `pii_redacted: true` is added to every trajectory's `tags`. After redaction, the same detectors are re-run on the output as a defense-in-depth gate; surviving matches are recorded as `pii_leak_count` and the `--quarantine` / `--fail-on-leak` flags route those rows out-of-band or abort the run.
 
 **Tests:**
 - `test_pii.py::test_redact_trajectory_marks_pii_redacted_tag` — tag is set after redaction.
 - `test_pii.py::test_redactor_consistent_placeholders` — placeholders are stable.
 - `test_pii.py::test_audit_sampler_is_deterministic` — same seed → same sample.
+- `test_pii.py::test_verify_redacted_no_false_positive_on_placeholders` — `[EMAIL_1]` is not flagged as a leak of itself.
+- `test_pii.py::test_verify_redacted_catches_rule_with_hole` — surviving PII (a rule miss) surfaces.
+- `test_pii.py::test_verify_redacted_handles_tool_call_args` — tool-call argument JSON is also re-scanned.
 
 **Reproduce:**
 ```bash
 tp run --config configs/example.yaml
 ls build/audit_sample.jsonl                    # exists
 jq '.tags.pii_redacted' build/redacted.jsonl    # all true
+# leakage gate
+tp redact --input build/canonical.jsonl --output build/redacted.jsonl \
+          --quarantine build/leaks.jsonl --fail-on-leak
 ```
 
 ## ✅ SFT JSONL validates against the chosen trainer dry run (LoRA) on toy and production-shaped samples without template mismatch
 
-**Implementation:** `SFTRecord` mirrors the OpenAI / TRL chat shape; `apply_template` renders ChatML / Llama-3 / plain. Tool calls fold into a single assistant message so the resulting JSONL passes through `transformers` chat templates unchanged.
+**Implementation:** `SFTRecord` mirrors the OpenAI / TRL chat shape; `apply_template` renders ChatML / Llama-3 / Qwen / Gemma / Mistral / plain. Tool calls fold into a single assistant message so the resulting JSONL passes through `transformers` chat templates unchanged. The `tp validate-template` subcommand actually feeds every exported row through `apply_chat_template` (or the shipped Jinja templates with a whitespace-token fallback) and reports overflow / render errors. SFT records also carry per-message `loss_weights` so trainers can mask user/tool tokens.
 
 **Tests:**
 - `test_export.py::test_qa_trajectory_to_messages` — text-only Q&A.
 - `test_export.py::test_agent_trajectory_to_messages` — multi-tool with recovery preserves order.
 - `test_export.py::test_every_known_template_renders` — every bundled template renders without error.
+- `test_export.py::test_every_template_renders_tool_calls` — every template round-trips multi-tool trajectories.
+- `test_export.py::test_sft_record_has_loss_weights_aligned_with_messages` — default loss policy aligns weights with messages.
 - `test_schemas.py::test_sft_message_validators` — strict role/content invariants.
+- `test_validate.py::test_template_dryrun_passes_on_valid_sft` — render+tokenize round-trip succeeds.
+- `test_validate.py::test_template_dryrun_flags_overflow` — context overflow is caught.
 
 **Reproduce:**
 ```bash
-tp export sft --input build/tagged.jsonl --output-dir build/sft --template chatml
-# Then in Python:
-python -c "
-from datasets import load_dataset
-from transformers import AutoTokenizer
-ds = load_dataset('json', data_files='build/sft/sft-*.jsonl')
-tok = AutoTokenizer.from_pretrained('NousResearch/Hermes-2-Pro-Llama-3-8B')  # has tool template
-for row in ds['train']:
-    tok.apply_chat_template(row['messages'], tokenize=False)
-"
+tp export sft --input build/tagged.jsonl --output-dir build/sft --template chatml \
+              --loss-policy assistant_only
+tp validate-template --input build/sft --template chatml --max-tokens 8192
+# Or against the trainer's actual tokenizer:
+tp validate-template --input build/sft --template hf \
+                     --tokenizer hf:meta-llama/Llama-3.1-8B-Instruct
 ```
 
 ## ✅ DPO JSONL validates against a small DPO dry run with required prompt, chosen, and rejected fields
@@ -128,4 +134,25 @@ Default thresholds (configurable):
 tp eval --student out/student.jsonl --teacher out/teacher.jsonl \
         --eval-set eval/holdout.jsonl --report build/eval_report.json
 jq .summary.student_acceptable build/eval_report.json
+```
+
+## ✅ Reproducibility: every published artifact is traceable to its inputs and config
+
+**Implementation:** `tp run --manifest <path>` writes a JSON manifest with the SHA-256 of every output file, the config hash (sorted-keys SHA-256), and the pipeline package version. Every event and trajectory carries a `lineage_id` derived from the raw record content, propagated unchanged through redaction, tagging, validation, and export — so any SFT/DPO row can be traced back to the exact log line.
+
+**Tests:**
+- `test_manifest.py::test_hash_obj_is_stable_across_key_order`
+- `test_manifest.py::test_verify_manifest_passes_when_files_match`
+- `test_manifest.py::test_verify_manifest_detects_tampering`
+- `test_manifest.py::test_verify_manifest_detects_missing`
+- `test_pii.py::test_lineage_id_set_by_canonical_adapter`
+- `test_pii.py::test_lineage_propagates_through_redaction`
+- `test_export.py::test_sft_metadata_carries_lineage_id`
+
+**Reproduce:**
+```bash
+tp run --config configs/example.yaml --manifest build/manifest.json
+tp manifest show build/manifest.json
+tp manifest verify build/manifest.json --base-dir .   # exit 0 on match, 2 on drift
+tp hash-config --config configs/example.yaml         # deterministic config hash
 ```

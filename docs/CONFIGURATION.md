@@ -21,6 +21,8 @@ pii:
   audit_rate: 0.05            # 0.0 to 1.0
   audit_seed: 0
   audit_cap: 1000
+  quarantine: build/redaction_quarantine.jsonl  # leaks routed here; null disables
+  fail_on_leak: false         # when true, run aborts if any row leaks PII
 
 tag:
   input: build/redacted.jsonl
@@ -44,10 +46,11 @@ split:
 sft:
   input: build/tagged.jsonl
   output_dir: build/sft
-  template: chatml            # chatml | llama3 | plain
+  template: chatml            # chatml | llama3 | qwen | gemma | mistral | plain
   system_prompt: null         # prepended to every record if set
   shard_size: 5000
   compress: false             # gzip shards if true
+  loss_policy: assistant_only # assistant_only | assistant_text_only | none
 
 dpo:
   input: build/tagged.jsonl
@@ -75,6 +78,8 @@ dpo:
 | `audit_seed`   | 0       | Same seed → same audit sample on rerun.                                |
 | `audit_cap`    | 1000    | Hard cap on audit sample size.                                         |
 | `rules_file`   | `null`  | YAML extending built-ins (or replacing them with `include_builtins: false`). |
+| `quarantine`   | `build/redaction_quarantine.jsonl` | Rows that still match a rule after redaction go here instead of the main output. Set to `null` to disable. |
+| `fail_on_leak` | `false` | When true, the run aborts (exit 2) if any row leaks PII after redaction. |
 
 ### Tagging
 
@@ -106,9 +111,25 @@ No tunables today — heuristics live in `tagging/complexity.py`. Bands map appr
 
 ### Export
 
-`template` controls only the chat string in the dataset card and what the trainer should expect — the JSONL is template-agnostic (structured `messages`).
+`template` controls only the chat string in the dataset card and what the trainer should expect — the JSONL is template-agnostic (structured `messages`). Built-ins: `chatml`, `llama3`, `qwen`, `gemma`, `mistral`, `plain`.
 
 `shard_size` is rows per shard; pick to align with your trainer's reading patterns. 1k–10k is typical.
+
+`loss_policy` (SFT only) emits a `metadata.loss_weights` array aligned with `messages`:
+
+| Policy                | Per-message weight                                                          |
+| --------------------- | --------------------------------------------------------------------------- |
+| `assistant_only`      | 1.0 for any assistant turn (text or tool-call); 0.0 elsewhere. (default)    |
+| `assistant_text_only` | 1.0 for assistant text-only messages; 0.0 for tool-call envelopes and rest. |
+| `none`                | Field is suppressed (backward compatibility for trainers that error on extras). |
+
+### Reproducibility (manifest)
+
+`tp run --manifest <path>` writes a JSON manifest with the config hash, package version, and SHA-256 of every output. `tp manifest verify <path> --base-dir <root>` recomputes those hashes — useful as a release gate before training jobs pick up a build. `tp hash-config --config <path>` prints the same config hash without running.
+
+### Trainer-tokenizer dry-run
+
+`tp validate-template --input <sft-dir-or-file> --template <name> [--tokenizer hf:<model_id>] [--max-tokens N]` actually renders and tokenizes every SFT row. Without `--tokenizer`, a whitespace approximation gives a conservative token estimate. With `--template hf --tokenizer hf:<model_id>`, the tokenizer's own embedded chat template is used instead of the bundled Jinja templates.
 
 ## Environment variables
 

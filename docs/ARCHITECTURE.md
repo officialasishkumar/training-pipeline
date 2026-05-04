@@ -62,10 +62,12 @@ raw logs ─────────────┤ ingest         │ ───
 | `tagging/stratify.py`       | Deterministic stratified train/val/test split           |
 | `validate/consistency.py`   | Tool registry + observation/contradiction checks        |
 | `validate/splits.py`        | MinHash+LSH near-duplicate leakage detection            |
-| `export/templates.py`       | ChatML / Llama-3 / plain Jinja chat templates           |
-| `export/sft.py`             | Trajectory → SFTRecord with chat-template alignment     |
+| `validate/template_dryrun.py` | Render+tokenize SFT rows to catch template/overflow bugs |
+| `export/templates.py`       | ChatML / Llama-3 / Qwen / Gemma / Mistral / plain Jinja |
+| `export/sft.py`             | Trajectory → SFTRecord with chat-template alignment + loss weights |
 | `export/dpo.py`             | Trajectory → DPORecord by feedback / failure_recovery   |
 | `export/shards.py`          | Sharded JSONL writer + dataset_card.json                |
+| `manifest.py`               | Run manifests with config hash + per-file SHA-256       |
 | `eval/tool_use.py`          | Tool-use accuracy / arg-match / schema-validity         |
 | `eval/compare.py`           | Teacher-vs-student delta with regression gate           |
 | `cli.py`                    | Typer-based CLI orchestrator                            |
@@ -80,6 +82,13 @@ These are enforced at multiple layers; if you break one, the next stage usually 
 3. **PII placeholders are consistent within a trajectory** — `[EMAIL_1]` always refers to the same email throughout a session, so the model still learns coreference.
 4. **Splits are stratified by stable keys** — `(complexity_band, domain)` by default. Per-stratum shuffling uses a seed derived from the stratum key, so adding a new stratum doesn't reshuffle existing ones.
 5. **No near-duplicate leakage** — split integrity checks at the corpus level using MinHash+LSH on user-text 5-grams, threshold default 0.85.
+6. **End-to-end lineage** — `lineage_id` is set by ingest from a hash of the raw record (or preserved from an explicit field) and propagated through every later stage. Every SFT/DPO row carries it on `metadata.lineage_id` so consumers can audit which raw log line produced which training row.
+7. **Defense-in-depth on PII** — after `Redactor` produces output, the same detectors run on it again with placeholder spans masked. Surviving matches surface as `LeakedFinding` records; the CLI can route those rows to a quarantine file and exit non-zero.
+8. **Trainer-format correctness** — `tp validate-template` actually renders and tokenizes every SFT row with the target chat template. Empty renders, template errors on tool envelopes, and context overflows fail the gate before training starts.
+
+## Reproducibility
+
+`tp run --manifest <path>` writes a JSON manifest containing the config hash (sorted-keys SHA-256), the pipeline package version, and per-file SHA-256s for every output. `tp manifest verify` recomputes those hashes against the on-disk build — a single edited shard or an out-of-date dataset surfaces as a hash mismatch. Path frames inside the manifest are anchored to the cwd at run time so `--base-dir` resolves them all in one place.
 
 ## Streaming guarantee
 
@@ -106,7 +115,7 @@ Drop a Python module under `training_pipeline/ingest/` (or anywhere imported bef
 
 ## Adding a chat template
 
-Either pass a Jinja string to `apply_template(template=jinja_src, ...)` or extend `KNOWN_TEMPLATES` in `export/templates.py` and reference by name.
+Either pass a Jinja string to `apply_template(template=jinja_src, ...)` or extend `KNOWN_TEMPLATES` in `export/templates.py` and reference by name. Built-ins now cover `chatml`, `llama3`, `qwen`, `gemma`, `mistral`, and `plain`. To validate against a real model's tokenizer, run `tp validate-template --tokenizer hf:<model_id> --template hf` — this uses the tokenizer's own `chat_template` rather than ours.
 
 ## Adding a PII rule
 

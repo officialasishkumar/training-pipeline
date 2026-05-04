@@ -38,6 +38,17 @@ class PIIConfig(BaseModel):
     audit_rate: float = 0.05
     audit_seed: int = 0
     audit_cap: int = 1000
+    quarantine: str | None = Field(
+        default="build/redaction_quarantine.jsonl",
+        description=(
+            "Where to write trajectories with surviving PII after redaction. "
+            "Set to null to skip quarantining (leaked rows still ship)."
+        ),
+    )
+    fail_on_leak: bool = Field(
+        default=False,
+        description="Abort the pipeline if any trajectory leaks PII after redaction.",
+    )
 
 
 class TagConfig(BaseModel):
@@ -62,10 +73,19 @@ class SFTExportConfig(BaseModel):
 
     input: str = "build/tagged.jsonl"
     output_dir: str = "build/sft"
-    template: Literal["chatml", "llama3", "plain"] = "chatml"
+    template: Literal["chatml", "llama3", "plain", "qwen", "gemma", "mistral"] = "chatml"
     system_prompt: str | None = None
     shard_size: int = 5000
     compress: bool = False
+    loss_policy: Literal["assistant_only", "assistant_text_only", "none"] = Field(
+        default="assistant_only",
+        description=(
+            "Per-message loss-weight policy emitted on metadata. "
+            "'assistant_only' (default) trains on assistant turns including "
+            "tool calls; 'assistant_text_only' skips the tool-call envelopes; "
+            "'none' suppresses the field for backward compat."
+        ),
+    )
 
 
 class DPOExportConfig(BaseModel):
