@@ -149,3 +149,119 @@ def test_load_rules_disable_builtins(tmp_path: Path):
     )
     rules = load_rules(p)
     assert {r.name for r in rules} == {"emp_id"}
+
+
+def test_verify_redacted_no_false_positive_on_placeholders(agent_trajectory: Trajectory):
+    """The leakage check must not classify [EMAIL_1] as a leak of itself."""
+    res = redact_trajectory(agent_trajectory)
+    assert res.has_leaks is False
+    assert "pii_leak_count" not in res.trajectory.tags
+
+
+def test_verify_redacted_catches_rule_with_hole():
+    """A redactor whose rule has a hole should flag the leftover as a leak.
+
+    Build a deliberately narrow rule (only matches a literal "secret-1") and
+    redact a payload containing "secret-1" *and* "secret-2". After redaction
+    "secret-2" survives. The same narrow rule, re-run, *still* finds it — so
+    the verifier must surface the leak.
+    """
+    from training_pipeline.pii.rules import PIIRule
+
+    narrow = PIIRule(
+        name="literal_one",
+        category="SECRET",
+        pattern=r"secret-1",
+        placeholder="[SECRET]",
+        flags=0,
+    )
+    fuller = PIIRule(
+        name="any_secret",
+        category="SECRET",
+        pattern=r"secret-\d",
+        placeholder="[SECRET]",
+        flags=0,
+    )
+    traj = Trajectory(
+        session_id="s",
+        events=[
+            UserEvent(
+                event_id="u",
+                session_id="s",
+                content="here is secret-1 and also secret-2",
+            ),
+        ],
+    )
+    # Redact with the narrow rule — secret-2 survives.
+    redacted = Redactor(rules=(narrow,)).redact_trajectory(traj).trajectory
+    assert "secret-2" in redacted.events[0].content
+    # Verify with the fuller rule — leak surfaces.
+    leaks = Redactor(rules=(fuller,)).verify_redacted(list(redacted.events))
+    assert any(lk.category == "SECRET" and "secret-2" in lk.text for lk in leaks)
+
+
+def test_verify_redacted_handles_tool_call_args(agent_trajectory: Trajectory):
+    """Leakage check should re-scan tool-call argument JSON, not just text."""
+
+    traj = Trajectory(
+        session_id="s",
+        events=[
+            UserEvent(event_id="u", session_id="s", content="hi"),
+            ToolCallEvent(
+                event_id="tc",
+                session_id="s",
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name="email_send",
+                        arguments={"to": "user@example.com", "subject": "ok"},
+                    )
+                ],
+            ),
+        ],
+    )
+    # Use a redactor with no rules — nothing gets redacted.
+    no_rules = Redactor(rules=())
+    redacted = no_rules.redact_trajectory(traj, verify=False).trajectory
+    # Verify with the full rule set — should see the surviving email in args.
+    full = Redactor()
+    leaks = full.verify_redacted(list(redacted.events))
+    assert any(lk.category == "EMAIL" and "tool_calls[0].arguments" in lk.field for lk in leaks)
+
+
+def test_lineage_id_set_by_canonical_adapter():
+    """Trajectories from canonical records get a content-derived lineage id."""
+    from training_pipeline.ingest.sources import from_canonical
+
+    record = {
+        "session_id": "s",
+        "events": [
+            {"kind": "user", "event_id": "u1", "session_id": "s", "content": "hi"}
+        ],
+    }
+    traj = from_canonical(record)
+    assert traj.lineage_id and traj.lineage_id.startswith("lin_")
+    assert all(ev.lineage_id == traj.lineage_id for ev in traj.events)
+    # Re-running the adapter on the same record yields the same id.
+    again = from_canonical(record)
+    assert again.lineage_id == traj.lineage_id
+
+
+def test_lineage_propagates_through_redaction():
+    from training_pipeline.ingest.sources import from_canonical
+
+    record = {
+        "session_id": "s",
+        "events": [
+            {
+                "kind": "user",
+                "event_id": "u1",
+                "session_id": "s",
+                "content": "Email me at user@example.com",
+            }
+        ],
+    }
+    traj = from_canonical(record)
+    res = redact_trajectory(traj)
+    assert res.trajectory.lineage_id == traj.lineage_id
+    assert all(ev.lineage_id == traj.lineage_id for ev in res.trajectory.events)

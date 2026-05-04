@@ -1,6 +1,6 @@
 """Apply detections back to text and trajectories.
 
-Two important properties:
+Three important properties:
 
 1. **Consistency** — the same value gets the same placeholder *within a
    trajectory* so multi-turn coreference is preserved. ``user@example.com``
@@ -9,6 +9,12 @@ Two important properties:
 2. **Auditability** — every redaction is recorded so a sampling tool can
    surface raw values for human review *without* persisting them in the main
    output.
+3. **Defense-in-depth** — after redaction, the same detectors are re-run over
+   the output. If anything still matches (a regex with a hole, a placeholder
+   that happens to look like PII, an artefact of the source format), the
+   trajectory is flagged so the caller can quarantine it instead of shipping.
+   The leakage detector ignores the canonical ``[CATEGORY_n]`` placeholder
+   spans so we don't trip on our own redactions.
 
 For tool arguments and results we redact the JSON-serialised form; downstream
 trainers tokenise the same string anyway.
@@ -22,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import orjson
+import regex as re
 
 from training_pipeline.pii.rules import (
     BUILTIN_RULES,
@@ -43,6 +50,10 @@ from training_pipeline.schemas.events import (
 log = logging.getLogger(__name__)
 
 
+_PLACEHOLDER_RE = re.compile(r"\[[A-Z][A-Z0-9_]*(?:_\d+)?\]")
+"""Spans that this redactor itself produced; ignored by leakage detection."""
+
+
 @dataclass
 class _RedactionLog:
     """Internal: detections recorded during redaction, used by the audit sampler."""
@@ -50,6 +61,21 @@ class _RedactionLog:
     text: str
     detections: list[PIIDetection]
     placeholders: dict[str, str]
+
+
+@dataclass
+class LeakedFinding:
+    """One detector hit found *after* redaction.
+
+    Surfaced by ``Redactor.verify_redacted`` so callers can route the offending
+    trajectory to quarantine rather than shipping it.
+    """
+
+    event_id: str
+    rule: str
+    category: str
+    text: str
+    field: str = "content"
 
 
 @dataclass
@@ -61,11 +87,18 @@ class RedactionResult:
         report: per-category counts, useful for an audit summary.
         sample: a list of (event_id, original_text, redacted_text, detections)
             tuples — *only* populated when ``audit_rate`` is positive.
+        leaks: detector hits that survived redaction (defense-in-depth).
+            Empty unless ``verify=True`` is passed to ``redact_trajectory``.
     """
 
     trajectory: Trajectory
     report: dict[str, int] = field(default_factory=dict)
     sample: list[dict[str, Any]] = field(default_factory=list)
+    leaks: list[LeakedFinding] = field(default_factory=list)
+
+    @property
+    def has_leaks(self) -> bool:
+        return bool(self.leaks)
 
 
 class Redactor:
@@ -137,8 +170,15 @@ class Redactor:
         trajectory: Trajectory,
         *,
         record_for_audit: bool = False,
+        verify: bool = True,
     ) -> RedactionResult:
-        """Redact every textual field of every event."""
+        """Redact every textual field of every event.
+
+        When ``verify`` is true (the default) the redacted trajectory is
+        re-scanned with the same detectors. Any surviving match is recorded as
+        a ``LeakedFinding`` on the result; the trajectory is also tagged with
+        ``pii_leak_count`` so downstream stages can filter or fail loudly.
+        """
         memo: dict[str, str] = {}
         category_counts: dict[str, int] = defaultdict(int)
         new_events: list[Event] = []
@@ -164,19 +204,73 @@ class Redactor:
                     }
                 )
 
+        leaks: list[LeakedFinding] = self.verify_redacted(new_events) if verify else []
+
+        new_tags: dict[str, Any] = {
+            **trajectory.tags,
+            "pii_redacted": True,
+            "pii_counts": dict(category_counts),
+        }
+        if leaks:
+            new_tags["pii_leak_count"] = len(leaks)
+            new_tags["pii_leak_categories"] = sorted({lk.category for lk in leaks})
+
         new_traj = Trajectory(
             session_id=trajectory.session_id,
             events=new_events,
             source=trajectory.source,
             domain=trajectory.domain,
-            tags={**trajectory.tags, "pii_redacted": True, "pii_counts": dict(category_counts)},
+            tags=new_tags,
             schema_version=trajectory.schema_version,
+            lineage_id=trajectory.lineage_id,
         )
         return RedactionResult(
             trajectory=new_traj,
             report=dict(category_counts),
             sample=sample,
+            leaks=leaks,
         )
+
+    def verify_redacted(self, events: list[Event]) -> list[LeakedFinding]:
+        """Re-run detectors on already-redacted events; return surviving hits.
+
+        Placeholder spans of the form ``[CATEGORY]`` or ``[CATEGORY_n]`` are
+        masked out before detection so we don't accidentally classify our own
+        redactions as leaks. Any returned finding is a real failure of the
+        redactor or rule set and the trajectory should not ship.
+        """
+        out: list[LeakedFinding] = []
+        for ev in events:
+            for field_name, value in self._textual_fields(ev):
+                masked = _mask_placeholders(value)
+                hits = detect_all(masked, self.rules)
+                for d in hits:
+                    out.append(
+                        LeakedFinding(
+                            event_id=ev.event_id,
+                            rule=d.rule,
+                            category=d.category,
+                            text=d.text,
+                            field=field_name,
+                        )
+                    )
+        return out
+
+    @staticmethod
+    def _textual_fields(ev: Event) -> list[tuple[str, str]]:
+        """Yield ``(field_name, text)`` pairs that the verifier should re-scan."""
+        if isinstance(ev, UserEvent | AssistantEvent):
+            return [("content", ev.content)]
+        if isinstance(ev, ToolResultEvent):
+            return [("content", ev.content)]
+        if isinstance(ev, ToolCallEvent):
+            return [
+                (f"tool_calls[{i}].arguments", orjson.dumps(c.arguments).decode("utf-8"))
+                for i, c in enumerate(ev.tool_calls)
+            ]
+        if isinstance(ev, ErrorEvent):
+            return [("message", ev.message)]
+        return []
 
     def _redact_event(
         self,
@@ -221,11 +315,19 @@ class Redactor:
         return ev, all_detections
 
 
+def _mask_placeholders(text: str) -> str:
+    """Replace ``[CATEGORY_n]`` spans with empty strings before re-detection."""
+    return _PLACEHOLDER_RE.sub("", text)
+
+
 def redact_trajectory(
     trajectory: Trajectory,
     *,
     rules: tuple[PIIRule, ...] = BUILTIN_RULES,
     record_for_audit: bool = False,
+    verify: bool = True,
 ) -> RedactionResult:
     """Convenience: stateless wrapper around ``Redactor.redact_trajectory``."""
-    return Redactor(rules=rules).redact_trajectory(trajectory, record_for_audit=record_for_audit)
+    return Redactor(rules=rules).redact_trajectory(
+        trajectory, record_for_audit=record_for_audit, verify=verify
+    )
