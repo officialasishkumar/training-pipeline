@@ -20,7 +20,9 @@ the same code paths are tested by ``pytest`` and exercised in production.
     tp manifest show      PATH
     tp manifest verify    PATH [--base-dir DIR]
     tp hash-config        --config FILE
-    tp eval               --student FILE --teacher FILE [--report FILE]
+    tp eval outputs       --student FILE --teacher FILE --eval-set FILE
+    tp eval compare       --teacher FILE --student FILE --suite FILE
+                          [--quality-floor 0.95] [--latency-target-ms 4000]
     tp generate seeds         --input PATH --output PATH [--embedder NAME]
                               [--cluster-method NAME] [--n-clusters K]
     tp generate trajectories  --seeds PATH --output PATH --tool-registry FILE
@@ -1314,8 +1316,12 @@ def validate_template_cmd(
     console.print("[green]validate-template:[/green] all rows render and fit")
 
 
-@app.command()
-def eval(
+eval_app = typer.Typer(name="eval", help="Eval-set comparisons and replacement rubrics.")
+app.add_typer(eval_app, name="eval")
+
+
+@eval_app.command("outputs")
+def eval_outputs_cmd(
     student: Annotated[Path, typer.Option("--student")],
     teacher: Annotated[Path, typer.Option("--teacher")],
     eval_set: Annotated[
@@ -1325,7 +1331,7 @@ def eval(
     report: Annotated[Path | None, typer.Option("--report")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Compare teacher and student outputs on a held-out eval set."""
+    """Compare teacher and student outputs on a held-out eval set (legacy)."""
     _setup_logging(verbose)
     from training_pipeline.eval.compare import compare_outputs
 
@@ -1341,6 +1347,84 @@ def eval(
     for k, vals in summary["metrics"].items():
         table.add_row(k, f"{vals['teacher']:.3f}", f"{vals['student']:.3f}")
     console.print(table)
+
+
+@eval_app.command("compare")
+def eval_compare_cmd(
+    teacher: Annotated[Path, typer.Option("--teacher", help="Teacher output JSONL.")],
+    student: Annotated[Path, typer.Option("--student", help="Student output JSONL.")],
+    suite: Annotated[
+        Path,
+        typer.Option("--suite", help="Held-out eval set JSONL with edge_case_category tags."),
+    ],
+    report: Annotated[Path | None, typer.Option("--report")] = None,
+    teacher_params: Annotated[int | None, typer.Option("--teacher-params")] = None,
+    student_params: Annotated[int | None, typer.Option("--student-params")] = None,
+    teacher_context: Annotated[int | None, typer.Option("--teacher-context")] = None,
+    student_context: Annotated[int | None, typer.Option("--student-context")] = None,
+    quality_floor: Annotated[
+        float,
+        typer.Option(
+            "--quality-floor",
+            help="Min student/teacher ratio per quality metric (default 0.95).",
+        ),
+    ] = 0.95,
+    latency_target_ms: Annotated[float, typer.Option("--latency-target-ms")] = 4000.0,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Run the teacher → student replacement rubric (see docs/REPLACEMENT_CRITERIA.md)."""
+    _setup_logging(verbose)
+    from training_pipeline.eval.replacement import (
+        ReplacementThresholds,
+        evaluate_replacement,
+    )
+
+    thresholds = ReplacementThresholds(
+        quality_ratio_floor=quality_floor,
+        latency_p95_target_ms=latency_target_ms,
+    )
+    verdict = evaluate_replacement(
+        teacher_outputs_path=teacher,
+        student_outputs_path=student,
+        eval_set_path=suite,
+        thresholds=thresholds,
+        teacher_params=teacher_params,
+        student_params=student_params,
+        teacher_context_window=teacher_context,
+        student_context_window=student_context,
+    )
+    if report:
+        import orjson
+
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_bytes(orjson.dumps(verdict.as_dict(), option=orjson.OPT_INDENT_2))
+
+    table = Table(title="Replacement rubric (per category)")
+    table.add_column("Category")
+    table.add_column("N", justify="right")
+    table.add_column("Metric")
+    table.add_column("Teacher", justify="right")
+    table.add_column("Student", justify="right")
+    table.add_column("Δ", justify="right")
+    for cat in verdict.by_category:
+        deltas = cat.deltas()
+        for metric in ("tool_call_validity_rate", "trajectory_success_rate", "persona_adherence_rate", "latency_p95_ms"):
+            table.add_row(
+                cat.category,
+                str(cat.n_prompts),
+                metric,
+                f"{cat.teacher.get(metric, 0.0):.3f}",
+                f"{cat.student.get(metric, 0.0):.3f}",
+                f"{deltas.get(metric, 0.0):+.3f}",
+            )
+    console.print(table)
+    if verdict.accepted:
+        console.print("[green]eval compare:[/green] verdict ACCEPTED")
+    else:
+        console.print("[red]eval compare:[/red] verdict REJECTED")
+        for reason in verdict.reasons:
+            console.print(f"  - {reason}")
+        raise typer.Exit(code=2)
 
 
 def main() -> None:
