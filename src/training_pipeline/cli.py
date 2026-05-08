@@ -27,6 +27,9 @@ the same code paths are tested by ``pytest`` and exercised in production.
                               [--backend stub|transformers|vllm] [--model ID]
                               [--fixtures-dir DIR] [--max-steps N]
     tp generate stratify      --input PATH --output PATH [--cap-per-bucket N]
+    tp score                  --persona FILE --input PATH --output PATH
+    tp dpo synthesize         --input PATH --output PATH --strategy NAME
+                              [--persona FILE]
     tp version
 """
 
@@ -86,6 +89,8 @@ generate_app = typer.Typer(
     help="Synthesise diverse trajectories from log seeds + a mock tool environment.",
 )
 app.add_typer(generate_app, name="generate")
+dpo_app = typer.Typer(name="dpo", help="DPO pair construction commands.")
+app.add_typer(dpo_app, name="dpo")
 
 console = Console()
 
@@ -496,40 +501,101 @@ def export_dpo_cmd(
     input: Annotated[Path, typer.Option("--input", "-i")],
     output_dir: Annotated[Path, typer.Option("--output-dir", "-o")],
     strategy: Annotated[str, typer.Option("--strategy")] = "feedback",
+    persona: Annotated[
+        Path | None,
+        typer.Option("--persona", help="persona.md (required for persona_violation)."),
+    ] = None,
     system_prompt: Annotated[str | None, typer.Option("--system-prompt")] = None,
     shard_size: Annotated[int, typer.Option("--shard-size")] = 5000,
     compress: Annotated[bool, typer.Option("--compress")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Build DPO JSONL shards with prompt/chosen/rejected and a dataset card."""
+    """Build DPO JSONL shards with prompt/chosen/rejected and a dataset card.
+
+    Strategies:
+      * ``feedback``           — explicit user feedback in trajectory tags (legacy)
+      * ``failure_recovery``   — within-trajectory recovery contrast (legacy)
+      * ``real_pairs``         — same seed cluster, success vs failure
+      * ``persona_violation``  — synthesised rejected via rule-targeted rewrite
+      * ``tool_inefficiency``  — synthesised rejected via longer-path rewrite
+      * ``all``                — every persona-aware strategy at once
+    """
     _setup_logging(verbose)
     output_dir.mkdir(parents=True, exist_ok=True)
-    # We need a sharded writer but DPO records flow from export_dpo_jsonl;
-    # implement sharding via a generator + ShardWriter directly.
-    from training_pipeline.export.dpo import (
-        _from_failure_recovery,
-        _from_feedback,
+
+    legacy_strategies = {"feedback", "failure_recovery"}
+    persona_strategies = {"real_pairs", "persona_violation", "tool_inefficiency", "all"}
+
+    if strategy in legacy_strategies:
+        from training_pipeline.export.dpo import _from_failure_recovery, _from_feedback
+
+        strat = DPOPairStrategy(strategy)
+        n = 0
+        with ShardWriter(
+            output_dir, shard_size=shard_size, prefix="dpo", compress=compress
+        ) as writer:
+            for traj in _iter_trajectories(input):
+                rows = (
+                    _from_feedback(traj, system_prompt=system_prompt)
+                    if strat is DPOPairStrategy.FEEDBACK
+                    else _from_failure_recovery(traj, system_prompt=system_prompt)
+                )
+                for record in rows:
+                    writer.write(record)
+                    n += 1
+            fingerprint = writer.fingerprint()
+        write_dataset_card(
+            output_dir,
+            name="dpo",
+            record_count=n,
+            fingerprint=fingerprint,
+            fields=["prompt", "chosen", "rejected", "metadata"],
+            extra={"strategy": strategy},
+        )
+        console.print(f"[green]export dpo:[/green] {n} records → {output_dir}")
+        return
+
+    if strategy not in persona_strategies:
+        console.print(f"[red]export dpo:[/red] unknown strategy {strategy!r}")
+        raise typer.Exit(code=2)
+
+    from training_pipeline.persona.dpo_synthesis import (
+        PreferencePairBuilder,
+        PreferencePairSource,
+        StubRewriteProvider,
+    )
+    from training_pipeline.persona.loader import parse_persona
+    from training_pipeline.persona.scorer import PersonaScorer, StubJudge
+
+    sources: list[PreferencePairSource] = (
+        list(PreferencePairSource)
+        if strategy == "all"
+        else [PreferencePairSource(strategy)]
     )
 
-    strat = DPOPairStrategy(strategy)
+    p = parse_persona(persona) if persona else None
+    if PreferencePairSource.PERSONA_VIOLATION in sources and p is None:
+        console.print("[red]export dpo:[/red] --persona is required for persona_violation")
+        raise typer.Exit(code=2)
+    scorer = PersonaScorer(persona=p, judge=StubJudge()) if p else None
+    builder = PreferencePairBuilder(
+        persona=p,
+        scorer=scorer,
+        rewrite_provider=StubRewriteProvider(),
+        system_prompt=system_prompt,
+    )
+
+    counts: dict[str, int] = {}
     n = 0
     with ShardWriter(
-        output_dir,
-        shard_size=shard_size,
-        prefix="dpo",
-        compress=compress,
+        output_dir, shard_size=shard_size, prefix="dpo", compress=compress
     ) as writer:
-        for traj in _iter_trajectories(input):
-            if strat is DPOPairStrategy.FEEDBACK:
-                rows = _from_feedback(traj, system_prompt=system_prompt)
-            elif strat is DPOPairStrategy.FAILURE_RECOVERY:
-                rows = _from_failure_recovery(traj, system_prompt=system_prompt)
-            else:
-                console.print(f"[red]export dpo:[/red] strategy {strategy!r} not supported via CLI")
-                raise typer.Exit(code=2)
-            for record in rows:
-                writer.write(record)
-                n += 1
+        for record in builder.build(_iter_trajectories(input), sources=sources):
+            writer.write(record)
+            n += 1
+            counts[record.metadata.get("source", "unknown")] = (
+                counts.get(record.metadata.get("source", "unknown"), 0) + 1
+            )
         fingerprint = writer.fingerprint()
     write_dataset_card(
         output_dir,
@@ -537,7 +603,7 @@ def export_dpo_cmd(
         record_count=n,
         fingerprint=fingerprint,
         fields=["prompt", "chosen", "rejected", "metadata"],
-        extra={"strategy": strategy},
+        extra={"strategy": strategy, "source_breakdown": counts},
     )
     console.print(f"[green]export dpo:[/green] {n} records → {output_dir}")
 
@@ -961,6 +1027,155 @@ def generate_stratify_cmd(
     for k, v in sorted(counts.items(), key=lambda x: (-x[1], x[0])):
         table.add_row(k, str(v))
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Persona scoring + DPO synthesis
+# ---------------------------------------------------------------------------
+
+
+@app.command("score")
+def score_cmd(
+    persona: Annotated[Path, typer.Option("--persona", help="persona.md file")],
+    input: Annotated[Path, typer.Option("--input", "-i", help="Trajectory JSONL input")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="Scored trajectory JSONL output")],
+    judge: Annotated[
+        str,
+        typer.Option(
+            "--judge",
+            help="Judge backend: 'stub' (default) or 'transformers'.",
+        ),
+    ] = "stub",
+    judge_model: Annotated[
+        str,
+        typer.Option("--judge-model", help="HF id used by the transformers judge."),
+    ] = "Qwen/Qwen2.5-7B-Instruct",
+    pass_threshold: Annotated[
+        float,
+        typer.Option("--pass-threshold", help="Aggregate score required to count as pass."),
+    ] = 0.6,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Annotate trajectories with a persona-grounded score.
+
+    Each row gets ``tags['persona']`` populated with per-rule pass/fail and
+    an aggregate score in 0..1. Hard-rule failures zero the aggregate.
+    """
+    _setup_logging(verbose)
+    from training_pipeline.persona.loader import parse_persona
+    from training_pipeline.persona.scorer import (
+        PersonaScorer,
+        StubJudge,
+        TransformersJudge,
+    )
+
+    p = parse_persona(persona)
+    if judge == "stub":
+        judge_obj: Any = StubJudge()
+    elif judge == "transformers":
+        judge_obj = TransformersJudge(model_id=judge_model)
+    else:
+        console.print(f"[red]score:[/red] unknown judge backend {judge!r}")
+        raise typer.Exit(code=2)
+
+    scorer = PersonaScorer(persona=p, judge=judge_obj)
+    n_pass = 0
+    n_fail = 0
+    n_total = 0
+
+    def _gen() -> Iterator[Trajectory]:
+        nonlocal n_pass, n_fail, n_total
+        for traj in _iter_trajectories(input):
+            n_total += 1
+            scored = scorer.annotate(traj)
+            if scored.tags["persona"]["score"] >= pass_threshold:
+                n_pass += 1
+            else:
+                n_fail += 1
+            yield scored
+
+    write_jsonl(output, _gen())
+    table = Table(title=f"Persona scoring ({p.name})")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("trajectories", str(n_total))
+    table.add_row("rules", str(len(p.rules)))
+    table.add_row(f"pass (≥{pass_threshold})", str(n_pass))
+    table.add_row("fail", str(n_fail))
+    console.print(table)
+
+
+@dpo_app.command("synthesize")
+def dpo_synthesize_cmd(
+    input: Annotated[Path, typer.Option("--input", "-i", help="Scored or tagged Trajectory JSONL")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="DPO record JSONL")],
+    strategy: Annotated[
+        str,
+        typer.Option(
+            "--strategy",
+            help="'real_pairs', 'persona_violation', 'tool_inefficiency', or 'all'.",
+        ),
+    ] = "all",
+    persona: Annotated[
+        Path | None,
+        typer.Option("--persona", help="persona.md (required for persona_violation)."),
+    ] = None,
+    system_prompt: Annotated[str | None, typer.Option("--system-prompt")] = None,
+    judge: Annotated[str, typer.Option("--judge")] = "stub",
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Synthesise DPO preference pairs from scored trajectories."""
+    _setup_logging(verbose)
+    from training_pipeline.persona.dpo_synthesis import (
+        PreferencePairBuilder,
+        PreferencePairSource,
+        StubRewriteProvider,
+    )
+    from training_pipeline.persona.loader import parse_persona
+    from training_pipeline.persona.scorer import PersonaScorer, StubJudge
+
+    p = parse_persona(persona) if persona else None
+    scorer = PersonaScorer(persona=p, judge=StubJudge()) if p and judge == "stub" else None
+
+    try:
+        sources: list[PreferencePairSource] = (
+            list(PreferencePairSource)
+            if strategy == "all"
+            else [PreferencePairSource(strategy)]
+        )
+    except ValueError as exc:
+        console.print(f"[red]dpo synthesize:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    if PreferencePairSource.PERSONA_VIOLATION in sources and p is None:
+        console.print(
+            "[red]dpo synthesize:[/red] --persona is required for persona_violation"
+        )
+        raise typer.Exit(code=2)
+
+    builder = PreferencePairBuilder(
+        persona=p,
+        scorer=scorer,
+        rewrite_provider=StubRewriteProvider(),
+        system_prompt=system_prompt,
+    )
+    counts: dict[str, int] = {}
+
+    def _gen() -> Iterator[Any]:
+        for rec in builder.build(_iter_trajectories(input), sources=sources):
+            src = rec.metadata.get("source", "unknown")
+            counts[src] = counts.get(src, 0) + 1
+            yield rec
+
+    write_jsonl(output, _gen())
+
+    table = Table(title=f"DPO synthesis ({strategy})")
+    table.add_column("Source")
+    table.add_column("Pairs", justify="right")
+    for k, v in sorted(counts.items()):
+        table.add_row(k, str(v))
+    console.print(table)
+    console.print(f"[green]dpo synthesize:[/green] {sum(counts.values())} pairs → {output}")
 
 
 manifest_app = typer.Typer(name="manifest", help="Inspect and verify run manifests.")
