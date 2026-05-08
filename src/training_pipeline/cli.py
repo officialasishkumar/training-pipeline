@@ -21,6 +21,12 @@ the same code paths are tested by ``pytest`` and exercised in production.
     tp manifest verify    PATH [--base-dir DIR]
     tp hash-config        --config FILE
     tp eval               --student FILE --teacher FILE [--report FILE]
+    tp generate seeds         --input PATH --output PATH [--embedder NAME]
+                              [--cluster-method NAME] [--n-clusters K]
+    tp generate trajectories  --seeds PATH --output PATH --tool-registry FILE
+                              [--backend stub|transformers|vllm] [--model ID]
+                              [--fixtures-dir DIR] [--max-steps N]
+    tp generate stratify      --input PATH --output PATH [--cap-per-bucket N]
     tp version
 """
 
@@ -75,6 +81,11 @@ app = typer.Typer(
 )
 export_app = typer.Typer(name="export", help="Build SFT or DPO datasets.")
 app.add_typer(export_app, name="export")
+generate_app = typer.Typer(
+    name="generate",
+    help="Synthesise diverse trajectories from log seeds + a mock tool environment.",
+)
+app.add_typer(generate_app, name="generate")
 
 console = Console()
 
@@ -581,8 +592,19 @@ def run(
                 )
             )
 
+    n_optional = sum(
+        bool(x) for x in (cfg.seeds.enabled, cfg.generate.enabled, cfg.stratify.enabled)
+    )
+    n_total_stages = 6 + n_optional
+    stage_idx = 0
+
+    def _step(label: str) -> str:
+        nonlocal stage_idx
+        stage_idx += 1
+        return f"[{stage_idx}/{n_total_stages}] {label}"
+
     console.rule(f"[bold]{cfg.name}")
-    console.print("[1/6] ingest")
+    console.print(_step("ingest"))
     s_started = now_utc()
     ingest(
         input=Path(cfg.ingest.input),
@@ -599,7 +621,7 @@ def run(
             )
         _stage("ingest", s_started, files)
 
-    console.print("[2/6] redact")
+    console.print(_step("redact"))
     s_started = now_utc()
     redact(
         input=Path(cfg.pii.input),
@@ -625,7 +647,55 @@ def run(
             )
         _stage("redact", s_started, files)
 
-    console.print("[3/6] tag")
+    if cfg.seeds.enabled:
+        console.print(_step("seeds"))
+        s_started = now_utc()
+        generate_seeds_cmd(
+            input=Path(cfg.seeds.input),
+            output=Path(cfg.seeds.output),
+            embedder=cfg.seeds.embedder,
+            embedder_model=cfg.seeds.embedder_model,
+            cluster_method=cfg.seeds.cluster_method,
+            n_clusters=cfg.seeds.n_clusters,
+            similarity_threshold=cfg.seeds.similarity_threshold,
+            seed=cfg.seeds.seed,
+            verbose=verbose,
+        )
+        if manifest_out:
+            _stage(
+                "seeds",
+                s_started,
+                file_entries([cfg.seeds.output], role="output", base_dir=manifest_anchor),
+            )
+
+    if cfg.generate.enabled:
+        console.print(_step("generate"))
+        s_started = now_utc()
+        if not cfg.generate.tool_registry:
+            raise typer.BadParameter(
+                "generate.tool_registry is required when generate.enabled is true"
+            )
+        generate_trajectories_cmd(
+            seeds=Path(cfg.generate.seeds_input),
+            output=Path(cfg.generate.output),
+            tool_registry=Path(cfg.generate.tool_registry),
+            fixtures_dir=Path(cfg.generate.fixtures_dir) if cfg.generate.fixtures_dir else None,
+            backend=cfg.generate.backend,
+            model_id=cfg.generate.model_id,
+            max_steps=cfg.generate.max_steps,
+            drop_on_invalid_args=cfg.generate.drop_on_invalid_args,
+            system_prompt=cfg.generate.system_prompt,
+            seed=cfg.generate.seed,
+            verbose=verbose,
+        )
+        if manifest_out:
+            _stage(
+                "generate",
+                s_started,
+                file_entries([cfg.generate.output], role="output", base_dir=manifest_anchor),
+            )
+
+    console.print(_step("tag"))
     s_started = now_utc()
     tag(
         input=Path(cfg.tag.input),
@@ -639,7 +709,7 @@ def run(
             file_entries([cfg.tag.output], role="output", base_dir=manifest_anchor),
         )
 
-    console.print("[4/6] validate")
+    console.print(_step("validate"))
     s_started = now_utc()
     validate(
         input=Path(cfg.validation.input),
@@ -664,7 +734,23 @@ def run(
             )
         _stage("validate", s_started, files)
 
-    console.print("[5/6] export sft")
+    if cfg.stratify.enabled:
+        console.print(_step("stratify"))
+        s_started = now_utc()
+        generate_stratify_cmd(
+            input=Path(cfg.stratify.input),
+            output=Path(cfg.stratify.output),
+            cap_per_bucket=cfg.stratify.cap_per_bucket,
+            verbose=verbose,
+        )
+        if manifest_out:
+            _stage(
+                "stratify",
+                s_started,
+                file_entries([cfg.stratify.output], role="output", base_dir=manifest_anchor),
+            )
+
+    console.print(_step("export sft"))
     s_started = now_utc()
     export_sft_cmd(
         input=Path(cfg.sft.input),
@@ -683,7 +769,7 @@ def run(
             discover_files(cfg.sft.output_dir, role="shard", base_dir=manifest_anchor),
         )
 
-    console.print("[6/6] export dpo")
+    console.print(_step("export dpo"))
     s_started = now_utc()
     export_dpo_cmd(
         input=Path(cfg.dpo.input),
@@ -706,6 +792,175 @@ def run(
         console.print(f"[green]manifest:[/green] {manifest.run_id} → {manifest_out}")
 
     console.rule("[green]done")
+
+
+# ---------------------------------------------------------------------------
+# Generate subcommands — seeds → trajectories → stratify
+# ---------------------------------------------------------------------------
+
+
+@generate_app.command("seeds")
+def generate_seeds_cmd(
+    input: Annotated[Path, typer.Option("--input", "-i", help="Canonical Trajectory JSONL")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="seeds.jsonl output")],
+    embedder: Annotated[
+        str,
+        typer.Option(
+            "--embedder",
+            help="'hash' (default, no deps) or 'sentence-transformers'.",
+        ),
+    ] = "hash",
+    embedder_model: Annotated[
+        str,
+        typer.Option("--embedder-model"),
+    ] = "sentence-transformers/all-MiniLM-L6-v2",
+    cluster_method: Annotated[
+        str,
+        typer.Option("--cluster-method", help="'greedy' (default) or 'kmeans'."),
+    ] = "greedy",
+    n_clusters: Annotated[
+        int | None,
+        typer.Option("--n-clusters", help="KMeans cluster count; auto-sized when unset."),
+    ] = None,
+    similarity_threshold: Annotated[
+        float,
+        typer.Option(
+            "--similarity-threshold",
+            help="Greedy clustering: min cosine to merge into an existing cluster.",
+        ),
+    ] = 0.72,
+    seed: Annotated[int, typer.Option("--seed")] = 0,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Cluster user questions across canonical logs and emit one seed per cluster."""
+    _setup_logging(verbose)
+    from training_pipeline.generate.seeds import SeedExtractor
+
+    extractor = SeedExtractor(
+        embedder=embedder,  # type: ignore[arg-type]
+        embedder_model=embedder_model,
+        cluster_method=cluster_method,  # type: ignore[arg-type]
+        n_clusters=n_clusters,
+        similarity_threshold=similarity_threshold,
+        seed=seed,
+    )
+    n = extractor.extract_to_jsonl(input, output)
+    console.print(f"[green]generate seeds:[/green] {n} seeds → {output}")
+
+
+@generate_app.command("trajectories")
+def generate_trajectories_cmd(
+    seeds: Annotated[Path, typer.Option("--seeds", "-s", help="seeds.jsonl input")],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    tool_registry: Annotated[
+        Path,
+        typer.Option("--tool-registry", help="YAML registry of tools and arg schemas."),
+    ],
+    fixtures_dir: Annotated[
+        Path | None,
+        typer.Option("--fixtures-dir", help="Directory of deterministic tool fixtures."),
+    ] = None,
+    backend: Annotated[
+        str,
+        typer.Option("--backend", help="'stub', 'transformers', or 'vllm'."),
+    ] = "stub",
+    model_id: Annotated[
+        str,
+        typer.Option("--model", help="HF model id used by transformers/vllm backends."),
+    ] = "Qwen/Qwen2.5-7B-Instruct",
+    max_steps: Annotated[int, typer.Option("--max-steps")] = 5,
+    drop_on_invalid_args: Annotated[
+        bool,
+        typer.Option(
+            "--drop-on-invalid-args/--keep-invalid-args",
+            help="Drop trajectories whose tool args fail the registry schema.",
+        ),
+    ] = True,
+    system_prompt: Annotated[str | None, typer.Option("--system-prompt")] = None,
+    seed: Annotated[int, typer.Option("--seed")] = 0,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Drive an LLM + mock tools to produce synthetic trajectories from seeds."""
+    _setup_logging(verbose)
+    from training_pipeline.generate.generator import (
+        StubLLMBackend,
+        TrajectoryGenerator,
+        TransformersLLMBackend,
+        VLLMBackend,
+    )
+    from training_pipeline.generate.mock_tools import MockToolRegistry
+
+    backend_obj: Any
+    if backend == "stub":
+        backend_obj = StubLLMBackend()
+    elif backend == "transformers":
+        backend_obj = TransformersLLMBackend(model_id=model_id)
+    elif backend == "vllm":
+        backend_obj = VLLMBackend(model_id=model_id)
+    else:
+        console.print(f"[red]generate trajectories:[/red] unknown backend {backend!r}")
+        raise typer.Exit(code=2)
+
+    mock = MockToolRegistry.from_config(
+        tool_registry,
+        fixtures_dir=fixtures_dir,
+        seed=seed,
+    )
+    gen = TrajectoryGenerator(
+        backend=backend_obj,
+        mock_tools=mock,
+        max_steps=max_steps,
+        drop_on_invalid_args=drop_on_invalid_args,
+        system_prompt=system_prompt,
+        seed=seed,
+    )
+    written, dropped = gen.generate_to_jsonl(seeds, output)
+    console.print(
+        f"[green]generate trajectories:[/green] {written} written, {dropped} dropped → {output}"
+    )
+
+
+@generate_app.command("stratify")
+def generate_stratify_cmd(
+    input: Annotated[Path, typer.Option("--input", "-i")],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    cap_per_bucket: Annotated[
+        int | None,
+        typer.Option(
+            "--cap-per-bucket",
+            help="Max trajectories per (difficulty x edge-case) bucket. None to keep all.",
+        ),
+    ] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Cap-per-bucket sampler over (difficulty x edge-case) buckets.
+
+    Use this *before* ``tp split`` to avoid exporting a dataset that's 90 %
+    "easy/single_tool" because that's what the long tail of logs produces.
+    """
+    _setup_logging(verbose)
+    from training_pipeline.generate.difficulty import annotate, stratify
+
+    counts: dict[str, int] = {}
+
+    def _gen() -> Iterator[Trajectory]:
+        for traj in _iter_trajectories(input):
+            yield annotate(traj)
+
+    items = list(_gen())
+    sampled = stratify(items, cap_per_bucket=cap_per_bucket)
+    for traj in sampled:
+        d = traj.tags.get("difficulty", {})
+        key = f"{d.get('tier', '?')}::{','.join(d.get('edge_cases', []) or ['none'])}"
+        counts[key] = counts.get(key, 0) + 1
+    write_jsonl(output, sampled)
+
+    table = Table(title=f"Stratified output ({len(sampled)}/{len(items)})")
+    table.add_column("Bucket")
+    table.add_column("Count", justify="right")
+    for k, v in sorted(counts.items(), key=lambda x: (-x[1], x[0])):
+        table.add_row(k, str(v))
+    console.print(table)
 
 
 manifest_app = typer.Typer(name="manifest", help="Inspect and verify run manifests.")
