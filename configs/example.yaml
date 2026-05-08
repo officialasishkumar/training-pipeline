@@ -22,6 +22,44 @@ pii:
   quarantine: build/redaction_quarantine.jsonl
   fail_on_leak: false
 
+# Synthetic generation layer (off by default — see docs/GENERATION.md).
+# Flip `enabled: true` in any of the three blocks below to opt in. When
+# enabled, the pipeline becomes:
+#   ingest -> redact -> seeds -> generate -> tag -> validate -> stratify -> export
+seeds:
+  enabled: false
+  input: build/redacted.jsonl
+  output: build/seeds.jsonl
+  # 'hash' is the dependency-free fallback; 'sentence-transformers' uses
+  # all-MiniLM-L6-v2 for higher-quality clustering (install [generate] extra).
+  embedder: hash
+  embedder_model: sentence-transformers/all-MiniLM-L6-v2
+  cluster_method: greedy             # or 'kmeans' (requires scikit-learn)
+  n_clusters: null
+  similarity_threshold: 0.72
+  seed: 0
+
+generate:
+  enabled: false
+  seeds_input: build/seeds.jsonl
+  output: build/synthetic.jsonl
+  # Backends: 'stub' (default, deterministic, no GPU); 'transformers' or
+  # 'vllm' for real models.
+  backend: stub
+  model_id: Qwen/Qwen2.5-7B-Instruct
+  tool_registry: configs/tools.yaml
+  fixtures_dir: null
+  max_steps: 5
+  drop_on_invalid_args: true
+  system_prompt: "You are an OpenAgriNet assistant for Indian farmers."
+  # Inject deliberate failures so we generate recovery trajectories.
+  # Probabilities are deterministic per (seed, tool, args, call_index).
+  failure_config: {}
+    # mandi_price:
+    #   NO_RESULTS: 0.10
+    #   RATE_LIMITED: 0.05
+  seed: 0
+
 tag:
   input: build/redacted.jsonl
   output: build/tagged.jsonl
@@ -40,6 +78,15 @@ split:
   seed: 42
   keys: [complexity_band, domain]
   near_duplicate_threshold: 0.85
+
+# Diversity sampler over (difficulty x edge-case) buckets.
+# Use this *before* `split` when generating from synthetic data so easy
+# single-tool trajectories don't dominate the dataset.
+stratify:
+  enabled: false
+  input: build/synthetic.jsonl
+  output: build/stratified.jsonl
+  cap_per_bucket: null               # e.g. 200 to cap each bucket at 200
 
 sft:
   input: build/tagged.jsonl

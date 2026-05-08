@@ -20,7 +20,18 @@ the same code paths are tested by ``pytest`` and exercised in production.
     tp manifest show      PATH
     tp manifest verify    PATH [--base-dir DIR]
     tp hash-config        --config FILE
-    tp eval               --student FILE --teacher FILE [--report FILE]
+    tp eval outputs       --student FILE --teacher FILE --eval-set FILE
+    tp eval compare       --teacher FILE --student FILE --suite FILE
+                          [--quality-floor 0.95] [--latency-target-ms 4000]
+    tp generate seeds         --input PATH --output PATH [--embedder NAME]
+                              [--cluster-method NAME] [--n-clusters K]
+    tp generate trajectories  --seeds PATH --output PATH --tool-registry FILE
+                              [--backend stub|transformers|vllm] [--model ID]
+                              [--fixtures-dir DIR] [--max-steps N]
+    tp generate stratify      --input PATH --output PATH [--cap-per-bucket N]
+    tp score                  --persona FILE --input PATH --output PATH
+    tp dpo synthesize         --input PATH --output PATH --strategy NAME
+                              [--persona FILE]
     tp version
 """
 
@@ -75,6 +86,13 @@ app = typer.Typer(
 )
 export_app = typer.Typer(name="export", help="Build SFT or DPO datasets.")
 app.add_typer(export_app, name="export")
+generate_app = typer.Typer(
+    name="generate",
+    help="Synthesise diverse trajectories from log seeds + a mock tool environment.",
+)
+app.add_typer(generate_app, name="generate")
+dpo_app = typer.Typer(name="dpo", help="DPO pair construction commands.")
+app.add_typer(dpo_app, name="dpo")
 
 console = Console()
 
@@ -485,40 +503,101 @@ def export_dpo_cmd(
     input: Annotated[Path, typer.Option("--input", "-i")],
     output_dir: Annotated[Path, typer.Option("--output-dir", "-o")],
     strategy: Annotated[str, typer.Option("--strategy")] = "feedback",
+    persona: Annotated[
+        Path | None,
+        typer.Option("--persona", help="persona.md (required for persona_violation)."),
+    ] = None,
     system_prompt: Annotated[str | None, typer.Option("--system-prompt")] = None,
     shard_size: Annotated[int, typer.Option("--shard-size")] = 5000,
     compress: Annotated[bool, typer.Option("--compress")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Build DPO JSONL shards with prompt/chosen/rejected and a dataset card."""
+    """Build DPO JSONL shards with prompt/chosen/rejected and a dataset card.
+
+    Strategies:
+      * ``feedback``           — explicit user feedback in trajectory tags (legacy)
+      * ``failure_recovery``   — within-trajectory recovery contrast (legacy)
+      * ``real_pairs``         — same seed cluster, success vs failure
+      * ``persona_violation``  — synthesised rejected via rule-targeted rewrite
+      * ``tool_inefficiency``  — synthesised rejected via longer-path rewrite
+      * ``all``                — every persona-aware strategy at once
+    """
     _setup_logging(verbose)
     output_dir.mkdir(parents=True, exist_ok=True)
-    # We need a sharded writer but DPO records flow from export_dpo_jsonl;
-    # implement sharding via a generator + ShardWriter directly.
-    from training_pipeline.export.dpo import (
-        _from_failure_recovery,
-        _from_feedback,
+
+    legacy_strategies = {"feedback", "failure_recovery"}
+    persona_strategies = {"real_pairs", "persona_violation", "tool_inefficiency", "all"}
+
+    if strategy in legacy_strategies:
+        from training_pipeline.export.dpo import _from_failure_recovery, _from_feedback
+
+        strat = DPOPairStrategy(strategy)
+        n = 0
+        with ShardWriter(
+            output_dir, shard_size=shard_size, prefix="dpo", compress=compress
+        ) as writer:
+            for traj in _iter_trajectories(input):
+                rows = (
+                    _from_feedback(traj, system_prompt=system_prompt)
+                    if strat is DPOPairStrategy.FEEDBACK
+                    else _from_failure_recovery(traj, system_prompt=system_prompt)
+                )
+                for record in rows:
+                    writer.write(record)
+                    n += 1
+            fingerprint = writer.fingerprint()
+        write_dataset_card(
+            output_dir,
+            name="dpo",
+            record_count=n,
+            fingerprint=fingerprint,
+            fields=["prompt", "chosen", "rejected", "metadata"],
+            extra={"strategy": strategy},
+        )
+        console.print(f"[green]export dpo:[/green] {n} records → {output_dir}")
+        return
+
+    if strategy not in persona_strategies:
+        console.print(f"[red]export dpo:[/red] unknown strategy {strategy!r}")
+        raise typer.Exit(code=2)
+
+    from training_pipeline.persona.dpo_synthesis import (
+        PreferencePairBuilder,
+        PreferencePairSource,
+        StubRewriteProvider,
+    )
+    from training_pipeline.persona.loader import parse_persona
+    from training_pipeline.persona.scorer import PersonaScorer, StubJudge
+
+    sources: list[PreferencePairSource] = (
+        list(PreferencePairSource)
+        if strategy == "all"
+        else [PreferencePairSource(strategy)]
     )
 
-    strat = DPOPairStrategy(strategy)
+    p = parse_persona(persona) if persona else None
+    if PreferencePairSource.PERSONA_VIOLATION in sources and p is None:
+        console.print("[red]export dpo:[/red] --persona is required for persona_violation")
+        raise typer.Exit(code=2)
+    scorer = PersonaScorer(persona=p, judge=StubJudge()) if p else None
+    builder = PreferencePairBuilder(
+        persona=p,
+        scorer=scorer,
+        rewrite_provider=StubRewriteProvider(),
+        system_prompt=system_prompt,
+    )
+
+    counts: dict[str, int] = {}
     n = 0
     with ShardWriter(
-        output_dir,
-        shard_size=shard_size,
-        prefix="dpo",
-        compress=compress,
+        output_dir, shard_size=shard_size, prefix="dpo", compress=compress
     ) as writer:
-        for traj in _iter_trajectories(input):
-            if strat is DPOPairStrategy.FEEDBACK:
-                rows = _from_feedback(traj, system_prompt=system_prompt)
-            elif strat is DPOPairStrategy.FAILURE_RECOVERY:
-                rows = _from_failure_recovery(traj, system_prompt=system_prompt)
-            else:
-                console.print(f"[red]export dpo:[/red] strategy {strategy!r} not supported via CLI")
-                raise typer.Exit(code=2)
-            for record in rows:
-                writer.write(record)
-                n += 1
+        for record in builder.build(_iter_trajectories(input), sources=sources):
+            writer.write(record)
+            n += 1
+            counts[record.metadata.get("source", "unknown")] = (
+                counts.get(record.metadata.get("source", "unknown"), 0) + 1
+            )
         fingerprint = writer.fingerprint()
     write_dataset_card(
         output_dir,
@@ -526,7 +605,7 @@ def export_dpo_cmd(
         record_count=n,
         fingerprint=fingerprint,
         fields=["prompt", "chosen", "rejected", "metadata"],
-        extra={"strategy": strategy},
+        extra={"strategy": strategy, "source_breakdown": counts},
     )
     console.print(f"[green]export dpo:[/green] {n} records → {output_dir}")
 
@@ -581,8 +660,19 @@ def run(
                 )
             )
 
+    n_optional = sum(
+        bool(x) for x in (cfg.seeds.enabled, cfg.generate.enabled, cfg.stratify.enabled)
+    )
+    n_total_stages = 6 + n_optional
+    stage_idx = 0
+
+    def _step(label: str) -> str:
+        nonlocal stage_idx
+        stage_idx += 1
+        return f"[{stage_idx}/{n_total_stages}] {label}"
+
     console.rule(f"[bold]{cfg.name}")
-    console.print("[1/6] ingest")
+    console.print(_step("ingest"))
     s_started = now_utc()
     ingest(
         input=Path(cfg.ingest.input),
@@ -599,7 +689,7 @@ def run(
             )
         _stage("ingest", s_started, files)
 
-    console.print("[2/6] redact")
+    console.print(_step("redact"))
     s_started = now_utc()
     redact(
         input=Path(cfg.pii.input),
@@ -625,7 +715,55 @@ def run(
             )
         _stage("redact", s_started, files)
 
-    console.print("[3/6] tag")
+    if cfg.seeds.enabled:
+        console.print(_step("seeds"))
+        s_started = now_utc()
+        generate_seeds_cmd(
+            input=Path(cfg.seeds.input),
+            output=Path(cfg.seeds.output),
+            embedder=cfg.seeds.embedder,
+            embedder_model=cfg.seeds.embedder_model,
+            cluster_method=cfg.seeds.cluster_method,
+            n_clusters=cfg.seeds.n_clusters,
+            similarity_threshold=cfg.seeds.similarity_threshold,
+            seed=cfg.seeds.seed,
+            verbose=verbose,
+        )
+        if manifest_out:
+            _stage(
+                "seeds",
+                s_started,
+                file_entries([cfg.seeds.output], role="output", base_dir=manifest_anchor),
+            )
+
+    if cfg.generate.enabled:
+        console.print(_step("generate"))
+        s_started = now_utc()
+        if not cfg.generate.tool_registry:
+            raise typer.BadParameter(
+                "generate.tool_registry is required when generate.enabled is true"
+            )
+        generate_trajectories_cmd(
+            seeds=Path(cfg.generate.seeds_input),
+            output=Path(cfg.generate.output),
+            tool_registry=Path(cfg.generate.tool_registry),
+            fixtures_dir=Path(cfg.generate.fixtures_dir) if cfg.generate.fixtures_dir else None,
+            backend=cfg.generate.backend,
+            model_id=cfg.generate.model_id,
+            max_steps=cfg.generate.max_steps,
+            drop_on_invalid_args=cfg.generate.drop_on_invalid_args,
+            system_prompt=cfg.generate.system_prompt,
+            seed=cfg.generate.seed,
+            verbose=verbose,
+        )
+        if manifest_out:
+            _stage(
+                "generate",
+                s_started,
+                file_entries([cfg.generate.output], role="output", base_dir=manifest_anchor),
+            )
+
+    console.print(_step("tag"))
     s_started = now_utc()
     tag(
         input=Path(cfg.tag.input),
@@ -639,7 +777,7 @@ def run(
             file_entries([cfg.tag.output], role="output", base_dir=manifest_anchor),
         )
 
-    console.print("[4/6] validate")
+    console.print(_step("validate"))
     s_started = now_utc()
     validate(
         input=Path(cfg.validation.input),
@@ -664,7 +802,23 @@ def run(
             )
         _stage("validate", s_started, files)
 
-    console.print("[5/6] export sft")
+    if cfg.stratify.enabled:
+        console.print(_step("stratify"))
+        s_started = now_utc()
+        generate_stratify_cmd(
+            input=Path(cfg.stratify.input),
+            output=Path(cfg.stratify.output),
+            cap_per_bucket=cfg.stratify.cap_per_bucket,
+            verbose=verbose,
+        )
+        if manifest_out:
+            _stage(
+                "stratify",
+                s_started,
+                file_entries([cfg.stratify.output], role="output", base_dir=manifest_anchor),
+            )
+
+    console.print(_step("export sft"))
     s_started = now_utc()
     export_sft_cmd(
         input=Path(cfg.sft.input),
@@ -683,7 +837,7 @@ def run(
             discover_files(cfg.sft.output_dir, role="shard", base_dir=manifest_anchor),
         )
 
-    console.print("[6/6] export dpo")
+    console.print(_step("export dpo"))
     s_started = now_utc()
     export_dpo_cmd(
         input=Path(cfg.dpo.input),
@@ -706,6 +860,324 @@ def run(
         console.print(f"[green]manifest:[/green] {manifest.run_id} → {manifest_out}")
 
     console.rule("[green]done")
+
+
+# ---------------------------------------------------------------------------
+# Generate subcommands — seeds → trajectories → stratify
+# ---------------------------------------------------------------------------
+
+
+@generate_app.command("seeds")
+def generate_seeds_cmd(
+    input: Annotated[Path, typer.Option("--input", "-i", help="Canonical Trajectory JSONL")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="seeds.jsonl output")],
+    embedder: Annotated[
+        str,
+        typer.Option(
+            "--embedder",
+            help="'hash' (default, no deps) or 'sentence-transformers'.",
+        ),
+    ] = "hash",
+    embedder_model: Annotated[
+        str,
+        typer.Option("--embedder-model"),
+    ] = "sentence-transformers/all-MiniLM-L6-v2",
+    cluster_method: Annotated[
+        str,
+        typer.Option("--cluster-method", help="'greedy' (default) or 'kmeans'."),
+    ] = "greedy",
+    n_clusters: Annotated[
+        int | None,
+        typer.Option("--n-clusters", help="KMeans cluster count; auto-sized when unset."),
+    ] = None,
+    similarity_threshold: Annotated[
+        float,
+        typer.Option(
+            "--similarity-threshold",
+            help="Greedy clustering: min cosine to merge into an existing cluster.",
+        ),
+    ] = 0.72,
+    seed: Annotated[int, typer.Option("--seed")] = 0,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Cluster user questions across canonical logs and emit one seed per cluster."""
+    _setup_logging(verbose)
+    from training_pipeline.generate.seeds import SeedExtractor
+
+    extractor = SeedExtractor(
+        embedder=embedder,  # type: ignore[arg-type]
+        embedder_model=embedder_model,
+        cluster_method=cluster_method,  # type: ignore[arg-type]
+        n_clusters=n_clusters,
+        similarity_threshold=similarity_threshold,
+        seed=seed,
+    )
+    n = extractor.extract_to_jsonl(input, output)
+    console.print(f"[green]generate seeds:[/green] {n} seeds → {output}")
+
+
+@generate_app.command("trajectories")
+def generate_trajectories_cmd(
+    seeds: Annotated[Path, typer.Option("--seeds", "-s", help="seeds.jsonl input")],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    tool_registry: Annotated[
+        Path,
+        typer.Option("--tool-registry", help="YAML registry of tools and arg schemas."),
+    ],
+    fixtures_dir: Annotated[
+        Path | None,
+        typer.Option("--fixtures-dir", help="Directory of deterministic tool fixtures."),
+    ] = None,
+    backend: Annotated[
+        str,
+        typer.Option("--backend", help="'stub', 'transformers', or 'vllm'."),
+    ] = "stub",
+    model_id: Annotated[
+        str,
+        typer.Option("--model", help="HF model id used by transformers/vllm backends."),
+    ] = "Qwen/Qwen2.5-7B-Instruct",
+    max_steps: Annotated[int, typer.Option("--max-steps")] = 5,
+    drop_on_invalid_args: Annotated[
+        bool,
+        typer.Option(
+            "--drop-on-invalid-args/--keep-invalid-args",
+            help="Drop trajectories whose tool args fail the registry schema.",
+        ),
+    ] = True,
+    system_prompt: Annotated[str | None, typer.Option("--system-prompt")] = None,
+    seed: Annotated[int, typer.Option("--seed")] = 0,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Drive an LLM + mock tools to produce synthetic trajectories from seeds."""
+    _setup_logging(verbose)
+    from training_pipeline.generate.generator import (
+        StubLLMBackend,
+        TrajectoryGenerator,
+        TransformersLLMBackend,
+        VLLMBackend,
+    )
+    from training_pipeline.generate.mock_tools import MockToolRegistry
+
+    backend_obj: Any
+    if backend == "stub":
+        backend_obj = StubLLMBackend()
+    elif backend == "transformers":
+        backend_obj = TransformersLLMBackend(model_id=model_id)
+    elif backend == "vllm":
+        backend_obj = VLLMBackend(model_id=model_id)
+    else:
+        console.print(f"[red]generate trajectories:[/red] unknown backend {backend!r}")
+        raise typer.Exit(code=2)
+
+    mock = MockToolRegistry.from_config(
+        tool_registry,
+        fixtures_dir=fixtures_dir,
+        seed=seed,
+    )
+    gen = TrajectoryGenerator(
+        backend=backend_obj,
+        mock_tools=mock,
+        max_steps=max_steps,
+        drop_on_invalid_args=drop_on_invalid_args,
+        system_prompt=system_prompt,
+        seed=seed,
+    )
+    written, dropped = gen.generate_to_jsonl(seeds, output)
+    console.print(
+        f"[green]generate trajectories:[/green] {written} written, {dropped} dropped → {output}"
+    )
+
+
+@generate_app.command("stratify")
+def generate_stratify_cmd(
+    input: Annotated[Path, typer.Option("--input", "-i")],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    cap_per_bucket: Annotated[
+        int | None,
+        typer.Option(
+            "--cap-per-bucket",
+            help="Max trajectories per (difficulty x edge-case) bucket. None to keep all.",
+        ),
+    ] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Cap-per-bucket sampler over (difficulty x edge-case) buckets.
+
+    Use this *before* ``tp split`` to avoid exporting a dataset that's 90 %
+    "easy/single_tool" because that's what the long tail of logs produces.
+    """
+    _setup_logging(verbose)
+    from training_pipeline.generate.difficulty import annotate, stratify
+
+    counts: dict[str, int] = {}
+
+    def _gen() -> Iterator[Trajectory]:
+        for traj in _iter_trajectories(input):
+            yield annotate(traj)
+
+    items = list(_gen())
+    sampled = stratify(items, cap_per_bucket=cap_per_bucket)
+    for traj in sampled:
+        d = traj.tags.get("difficulty", {})
+        key = f"{d.get('tier', '?')}::{','.join(d.get('edge_cases', []) or ['none'])}"
+        counts[key] = counts.get(key, 0) + 1
+    write_jsonl(output, sampled)
+
+    table = Table(title=f"Stratified output ({len(sampled)}/{len(items)})")
+    table.add_column("Bucket")
+    table.add_column("Count", justify="right")
+    for k, v in sorted(counts.items(), key=lambda x: (-x[1], x[0])):
+        table.add_row(k, str(v))
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Persona scoring + DPO synthesis
+# ---------------------------------------------------------------------------
+
+
+@app.command("score")
+def score_cmd(
+    persona: Annotated[Path, typer.Option("--persona", help="persona.md file")],
+    input: Annotated[Path, typer.Option("--input", "-i", help="Trajectory JSONL input")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="Scored trajectory JSONL output")],
+    judge: Annotated[
+        str,
+        typer.Option(
+            "--judge",
+            help="Judge backend: 'stub' (default) or 'transformers'.",
+        ),
+    ] = "stub",
+    judge_model: Annotated[
+        str,
+        typer.Option("--judge-model", help="HF id used by the transformers judge."),
+    ] = "Qwen/Qwen2.5-7B-Instruct",
+    pass_threshold: Annotated[
+        float,
+        typer.Option("--pass-threshold", help="Aggregate score required to count as pass."),
+    ] = 0.6,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Annotate trajectories with a persona-grounded score.
+
+    Each row gets ``tags['persona']`` populated with per-rule pass/fail and
+    an aggregate score in 0..1. Hard-rule failures zero the aggregate.
+    """
+    _setup_logging(verbose)
+    from training_pipeline.persona.loader import parse_persona
+    from training_pipeline.persona.scorer import (
+        PersonaScorer,
+        StubJudge,
+        TransformersJudge,
+    )
+
+    p = parse_persona(persona)
+    if judge == "stub":
+        judge_obj: Any = StubJudge()
+    elif judge == "transformers":
+        judge_obj = TransformersJudge(model_id=judge_model)
+    else:
+        console.print(f"[red]score:[/red] unknown judge backend {judge!r}")
+        raise typer.Exit(code=2)
+
+    scorer = PersonaScorer(persona=p, judge=judge_obj)
+    n_pass = 0
+    n_fail = 0
+    n_total = 0
+
+    def _gen() -> Iterator[Trajectory]:
+        nonlocal n_pass, n_fail, n_total
+        for traj in _iter_trajectories(input):
+            n_total += 1
+            scored = scorer.annotate(traj)
+            if scored.tags["persona"]["score"] >= pass_threshold:
+                n_pass += 1
+            else:
+                n_fail += 1
+            yield scored
+
+    write_jsonl(output, _gen())
+    table = Table(title=f"Persona scoring ({p.name})")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("trajectories", str(n_total))
+    table.add_row("rules", str(len(p.rules)))
+    table.add_row(f"pass (≥{pass_threshold})", str(n_pass))
+    table.add_row("fail", str(n_fail))
+    console.print(table)
+
+
+@dpo_app.command("synthesize")
+def dpo_synthesize_cmd(
+    input: Annotated[Path, typer.Option("--input", "-i", help="Scored or tagged Trajectory JSONL")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="DPO record JSONL")],
+    strategy: Annotated[
+        str,
+        typer.Option(
+            "--strategy",
+            help="'real_pairs', 'persona_violation', 'tool_inefficiency', or 'all'.",
+        ),
+    ] = "all",
+    persona: Annotated[
+        Path | None,
+        typer.Option("--persona", help="persona.md (required for persona_violation)."),
+    ] = None,
+    system_prompt: Annotated[str | None, typer.Option("--system-prompt")] = None,
+    judge: Annotated[str, typer.Option("--judge")] = "stub",
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Synthesise DPO preference pairs from scored trajectories."""
+    _setup_logging(verbose)
+    from training_pipeline.persona.dpo_synthesis import (
+        PreferencePairBuilder,
+        PreferencePairSource,
+        StubRewriteProvider,
+    )
+    from training_pipeline.persona.loader import parse_persona
+    from training_pipeline.persona.scorer import PersonaScorer, StubJudge
+
+    p = parse_persona(persona) if persona else None
+    scorer = PersonaScorer(persona=p, judge=StubJudge()) if p and judge == "stub" else None
+
+    try:
+        sources: list[PreferencePairSource] = (
+            list(PreferencePairSource)
+            if strategy == "all"
+            else [PreferencePairSource(strategy)]
+        )
+    except ValueError as exc:
+        console.print(f"[red]dpo synthesize:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    if PreferencePairSource.PERSONA_VIOLATION in sources and p is None:
+        console.print(
+            "[red]dpo synthesize:[/red] --persona is required for persona_violation"
+        )
+        raise typer.Exit(code=2)
+
+    builder = PreferencePairBuilder(
+        persona=p,
+        scorer=scorer,
+        rewrite_provider=StubRewriteProvider(),
+        system_prompt=system_prompt,
+    )
+    counts: dict[str, int] = {}
+
+    def _gen() -> Iterator[Any]:
+        for rec in builder.build(_iter_trajectories(input), sources=sources):
+            src = rec.metadata.get("source", "unknown")
+            counts[src] = counts.get(src, 0) + 1
+            yield rec
+
+    write_jsonl(output, _gen())
+
+    table = Table(title=f"DPO synthesis ({strategy})")
+    table.add_column("Source")
+    table.add_column("Pairs", justify="right")
+    for k, v in sorted(counts.items()):
+        table.add_row(k, str(v))
+    console.print(table)
+    console.print(f"[green]dpo synthesize:[/green] {sum(counts.values())} pairs → {output}")
 
 
 manifest_app = typer.Typer(name="manifest", help="Inspect and verify run manifests.")
@@ -844,8 +1316,12 @@ def validate_template_cmd(
     console.print("[green]validate-template:[/green] all rows render and fit")
 
 
-@app.command()
-def eval(
+eval_app = typer.Typer(name="eval", help="Eval-set comparisons and replacement rubrics.")
+app.add_typer(eval_app, name="eval")
+
+
+@eval_app.command("outputs")
+def eval_outputs_cmd(
     student: Annotated[Path, typer.Option("--student")],
     teacher: Annotated[Path, typer.Option("--teacher")],
     eval_set: Annotated[
@@ -855,7 +1331,7 @@ def eval(
     report: Annotated[Path | None, typer.Option("--report")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Compare teacher and student outputs on a held-out eval set."""
+    """Compare teacher and student outputs on a held-out eval set (legacy)."""
     _setup_logging(verbose)
     from training_pipeline.eval.compare import compare_outputs
 
@@ -871,6 +1347,84 @@ def eval(
     for k, vals in summary["metrics"].items():
         table.add_row(k, f"{vals['teacher']:.3f}", f"{vals['student']:.3f}")
     console.print(table)
+
+
+@eval_app.command("compare")
+def eval_compare_cmd(
+    teacher: Annotated[Path, typer.Option("--teacher", help="Teacher output JSONL.")],
+    student: Annotated[Path, typer.Option("--student", help="Student output JSONL.")],
+    suite: Annotated[
+        Path,
+        typer.Option("--suite", help="Held-out eval set JSONL with edge_case_category tags."),
+    ],
+    report: Annotated[Path | None, typer.Option("--report")] = None,
+    teacher_params: Annotated[int | None, typer.Option("--teacher-params")] = None,
+    student_params: Annotated[int | None, typer.Option("--student-params")] = None,
+    teacher_context: Annotated[int | None, typer.Option("--teacher-context")] = None,
+    student_context: Annotated[int | None, typer.Option("--student-context")] = None,
+    quality_floor: Annotated[
+        float,
+        typer.Option(
+            "--quality-floor",
+            help="Min student/teacher ratio per quality metric (default 0.95).",
+        ),
+    ] = 0.95,
+    latency_target_ms: Annotated[float, typer.Option("--latency-target-ms")] = 4000.0,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Run the teacher → student replacement rubric (see docs/REPLACEMENT_CRITERIA.md)."""
+    _setup_logging(verbose)
+    from training_pipeline.eval.replacement import (
+        ReplacementThresholds,
+        evaluate_replacement,
+    )
+
+    thresholds = ReplacementThresholds(
+        quality_ratio_floor=quality_floor,
+        latency_p95_target_ms=latency_target_ms,
+    )
+    verdict = evaluate_replacement(
+        teacher_outputs_path=teacher,
+        student_outputs_path=student,
+        eval_set_path=suite,
+        thresholds=thresholds,
+        teacher_params=teacher_params,
+        student_params=student_params,
+        teacher_context_window=teacher_context,
+        student_context_window=student_context,
+    )
+    if report:
+        import orjson
+
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_bytes(orjson.dumps(verdict.as_dict(), option=orjson.OPT_INDENT_2))
+
+    table = Table(title="Replacement rubric (per category)")
+    table.add_column("Category")
+    table.add_column("N", justify="right")
+    table.add_column("Metric")
+    table.add_column("Teacher", justify="right")
+    table.add_column("Student", justify="right")
+    table.add_column("Δ", justify="right")
+    for cat in verdict.by_category:
+        deltas = cat.deltas()
+        for metric in ("tool_call_validity_rate", "trajectory_success_rate", "persona_adherence_rate", "latency_p95_ms"):
+            table.add_row(
+                cat.category,
+                str(cat.n_prompts),
+                metric,
+                f"{cat.teacher.get(metric, 0.0):.3f}",
+                f"{cat.student.get(metric, 0.0):.3f}",
+                f"{deltas.get(metric, 0.0):+.3f}",
+            )
+    console.print(table)
+    if verdict.accepted:
+        console.print("[green]eval compare:[/green] verdict ACCEPTED")
+    else:
+        console.print("[red]eval compare:[/red] verdict REJECTED")
+        for reason in verdict.reasons:
+            console.print(f"  - {reason}")
+        raise typer.Exit(code=2)
 
 
 def main() -> None:

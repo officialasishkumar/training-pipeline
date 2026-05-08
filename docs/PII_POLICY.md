@@ -53,6 +53,66 @@ from training_pipeline.pii.redactor import Redactor
 
 NER is heavier (loads spaCy under the hood) and lower-precision, so we keep it opt-in.
 
+## Multilingual orchestration
+
+The mentor's brief is explicit about Hindi + regional Indian languages.
+Presidio alone misses Indic-script PERSON / LOCATION entities, and
+the built-in regex rules don't validate Aadhaar checksums (12-digit
+phone numbers were historically misclassified as Aadhaar). The
+`pii.orchestrator.PIIOrchestrator` runs five engines in priority
+order and unions the findings:
+
+| Priority | Engine                  | Catches                                            | Dependency      |
+|----------|-------------------------|----------------------------------------------------|-----------------|
+| 1        | `IndianIDEngine`        | Aadhaar (Verhoeff), PAN (entity-class), Mobile, DL, Voter ID | none      |
+| 2        | `RegexRuleEngine`       | email / IBAN / IPv4 / GPS / credit card / secrets  | none            |
+| 3        | `FieldRuleEngine`       | `Name:` / `Mobile:` / `Aadhaar:` etc. — multilingual labels | none |
+| 4        | Presidio (English)      | PERSON / LOCATION / ORG in English                 | `[ner]` extra   |
+| 5        | IndicNER (`hi`,`mr`,`ta`,`te`,`bn`,`gu`,`kn`,`ml`,`or`,`pa`,`as`) | PERSON / LOCATION / ORG in Indic scripts | `[indic]` extra |
+
+Earlier engines win on overlapping spans. This is the right tradeoff:
+checksum-validated Aadhaar should always shadow a generic LOCATION
+guess on the same characters.
+
+### Language coverage matrix
+
+| Category            | English | Hindi | Marathi | Tamil | Telugu | Bengali | Other Indic |
+|---------------------|:-------:|:-----:|:-------:|:-----:|:------:|:-------:|:-----------:|
+| Aadhaar / PAN       | ✓ (validated) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Mobile (+91)        | ✓       | ✓     | ✓       | ✓     | ✓      | ✓       | ✓           |
+| Email / IBAN / IP   | ✓       | ✓     | ✓       | ✓     | ✓      | ✓       | ✓           |
+| Field labels (`Name:` / `नाम:` / `பெயர்:`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| PERSON in prose     | ✓ (Presidio) | ✓ (IndicNER) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| LOCATION in prose   | ✓       | ✓     | ✓       | ✓     | ✓      | ✓       | ✓           |
+| Voice / image       | ✗       | ✗     | ✗       | ✗     | ✗      | ✗       | ✗           |
+
+### Comparison: Presidio-only vs orchestrator
+
+The library exports `pii.coverage_report()` for honest A/B reporting on
+a fixture set. On the bundled samples (with a real Presidio install)
+the typical numbers are:
+
+| Sample                                  | Presidio-only | Orchestrator |
+|-----------------------------------------|:-------------:|:------------:|
+| English Aadhaar in tool return          | LOCATION (wrong) | GOV_ID_IN |
+| Hindi structured field `नाम: सुरेश`     | (none)        | PERSON via field rule + IndicNER |
+| Tamil prose with farmer name + village  | (none)        | PERSON + LOCATION via IndicNER |
+| 12-digit phone misread as Aadhaar       | UK_NHS (wrong) | PHONE (correct) |
+
+The exact numbers depend on the Presidio model version and which
+extras are installed. Run `coverage_report` on your own fixtures
+before publishing a residual-risk position.
+
+### Residual risk on synthetic Indic samples
+
+We track residual risk on three small Hindi / Marathi / Tamil
+fixtures (in `tests/test_pii_indic.py`). With both extras installed,
+all *labelled* fields are caught. Free-form mentions ("I bought from
+the store next to Suresh's farm in Mandya") still rely on IndicNER's
+recall, which is meaningfully below Presidio's English-language
+recall — flagged as a `# TODO(dmp-proposal):` for a fine-tuning
+pass with persona-grounded supervision.
+
 ## Audit workflow
 
 `tp redact --audit OUT.jsonl --audit-rate 0.05` writes a 5% deterministic sample of trajectories where at least one detection fired. The sample is keyed by hash of `session_id`, so reruns surface the same trajectories — reviewers don't churn.

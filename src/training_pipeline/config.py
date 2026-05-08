@@ -110,6 +110,59 @@ class SplitConfig(BaseModel):
     near_duplicate_threshold: float = 0.85
 
 
+class SeedsConfig(BaseModel):
+    """Configuration for the synthetic-seed extraction stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    input: str = "build/redacted.jsonl"
+    output: str = "build/seeds.jsonl"
+    embedder: Literal["sentence-transformers", "hash"] = "hash"
+    embedder_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    cluster_method: Literal["kmeans", "greedy"] = "greedy"
+    n_clusters: int | None = None
+    similarity_threshold: float = 0.72
+    seed: int = 0
+
+
+class GenerateConfig(BaseModel):
+    """Configuration for the synthetic trajectory generation stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    seeds_input: str = "build/seeds.jsonl"
+    output: str = "build/synthetic.jsonl"
+    backend: Literal["stub", "transformers", "vllm"] = "stub"
+    model_id: str = "Qwen/Qwen2.5-7B-Instruct"
+    tool_registry: str | None = None
+    fixtures_dir: str | None = None
+    max_steps: int = 5
+    drop_on_invalid_args: bool = True
+    system_prompt: str | None = None
+    failure_config: dict[str, dict[str, float]] = Field(default_factory=dict)
+    """Per-tool failure-mode probability map: ``{tool: {MODE: prob}}``."""
+    seed: int = 0
+
+
+class StratifyConfig(BaseModel):
+    """Configuration for difficulty- and edge-case-aware sampling.
+
+    This is a separate stage from :class:`SplitConfig`: ``split`` produces
+    train/val/test indices over an existing dataset, while ``stratify``
+    caps per (difficulty x edge-case) bucket so the resulting set is
+    *diverse* before splitting.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    input: str = "build/synthetic.jsonl"
+    output: str = "build/stratified.jsonl"
+    cap_per_bucket: int | None = None
+
+
 class PipelineConfig(BaseModel):
     """Full pipeline config (every stage)."""
 
@@ -125,6 +178,9 @@ class PipelineConfig(BaseModel):
         serialization_alias="validate",
     )
     split: SplitConfig = Field(default_factory=SplitConfig)
+    seeds: SeedsConfig = Field(default_factory=SeedsConfig)
+    generate: GenerateConfig = Field(default_factory=GenerateConfig)
+    stratify: StratifyConfig = Field(default_factory=StratifyConfig)
     sft: SFTExportConfig = Field(default_factory=SFTExportConfig)
     dpo: DPOExportConfig = Field(default_factory=DPOExportConfig)
     extra_metadata: dict[str, Any] = Field(default_factory=dict)

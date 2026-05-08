@@ -54,9 +54,25 @@ ner = [
     "presidio-analyzer>=2.2",
     "presidio-anonymizer>=2.2",
 ]
+indic = [
+    # Multilingual PII engine (ai4bharat/IndicNER) for Hindi/Marathi/Tamil/...
+    # Heavy: pulls torch + transformers. The orchestrator falls back to a
+    # no-op when this isn't installed.
+    "transformers>=4.40",
+    "torch>=2.2",
+]
 hf = [
     "datasets>=2.16",
     "transformers>=4.40",
+]
+generate = [
+    # Heavy generation deps. The package falls back to a hash embedder + a
+    # stub LLM backend if these aren't installed, so tests stay light.
+    "sentence-transformers>=2.7",
+    "scikit-learn>=1.4",
+    "numpy>=1.26",
+    "transformers>=4.40",
+    "torch>=2.2",
 ]
 dev = [
     "pytest>=8",
