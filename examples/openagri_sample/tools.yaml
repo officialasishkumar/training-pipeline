@@ -1,0 +1,52 @@
+# Tool registry for the openagri_sample walkthrough.
+# Mirrors the kind of tools an OpenAgriNet farmer assistant has access to.
+tools:
+  fetch_agristack_data:
+    description: Look up a farmer profile from the AgriStack registry by ID.
+    required: [farmer_id]
+    properties:
+      farmer_id: string
+      fields: array
+
+  weather_forecast:
+    description: Multi-day weather forecast for a coordinate or district.
+    required: [days]
+    properties:
+      lat: number
+      lng: number
+      district: string
+      days: integer
+
+  soil_sensor:
+    description: Read soil moisture, pH, and temperature for a coordinate.
+    required: [lat, lng]
+    properties:
+      lat: number
+      lng: number
+      depth_cm: integer
+
+  mandi_price:
+    description: Latest mandi (market) prices for a commodity.
+    required: [commodity, market]
+    properties:
+      commodity: string
+      market: string
+      days: integer
+
+  pest_reports:
+    description: Recent pest-incidence reports filed in a district.
+    required: [district]
+    properties:
+      district: string
+      crop: string
+      days: integer
+
+  fertilizer_recommend:
+    description: Recommend NPK quantity for a crop given soil N/P/K levels.
+    required: [crop, soil_n, soil_p, soil_k]
+    properties:
+      crop: string
+      soil_n: number
+      soil_p: number
+      soil_k: number
+      area_ha: number

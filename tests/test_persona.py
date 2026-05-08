@@ -453,3 +453,21 @@ def test_example_persona_parses():
     # At least one programmatic rule and one judge rule.
     assert any(isinstance(r, ProgrammaticRule) for r in persona.rules)
     assert any(isinstance(r, LLMJudgeRule) for r in persona.rules)
+
+
+def test_example_persona_scores_without_regex_errors():
+    """Every programmatic rule in the shipped persona must compile cleanly.
+
+    A regex with an unterminated character class would only be discovered
+    when scoring runs — not at parse time. This catches that.
+    """
+    persona = parse_persona(Path("examples/persona.example.md"))
+    scorer = PersonaScorer(persona=persona, judge=StubJudge())
+    # Should not raise.
+    scorer.score(_traj("Plain assistant text with a https://example.com link."))
+
+
+def test_openagri_sample_persona_scores():
+    persona = parse_persona(Path("examples/openagri_sample/persona.md"))
+    scorer = PersonaScorer(persona=persona, judge=StubJudge())
+    scorer.score(_traj("OK with https://example.gov.in/x and 50 kg/ha urea."))

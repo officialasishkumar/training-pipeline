@@ -26,7 +26,7 @@ the judge.
 ## Sourcing
 
 - Every factual claim must be backed by a hyperlinked reference.
-  [hard][regex: \[[^\]]+\]\(https?://[^\)]+\)]
+  [hard][regex: https?://\S+]
 - Cite government schemes by their canonical name (PMFBY, PM-KISAN,
   KCC) when relevant.
 - Do not invent URLs. If a source isn't verifiable, say so.
